@@ -70,22 +70,30 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .context("failed to create GPU device")?;
-        Ok(Self { device, queue, adapter_info })
+        Ok(Self {
+            device,
+            queue,
+            adapter_info,
+        })
     }
 
     pub fn run(&self, task: Task, a: &[f32], b: &[f32], alpha: f32) -> Result<RunResult> {
         let n = a.len();
         let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
         if groups > MAX_DIM {
-            return Err(anyhow!("size {n} exceeds the max of {}", MAX_DIM * WORKGROUP_SIZE));
+            return Err(anyhow!(
+                "size {n} exceeds the max of {}",
+                MAX_DIM * WORKGROUP_SIZE
+            ));
         }
         let bytes = (n * 4) as u64;
         let storage = |label, data: &[f32]| {
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(data),
-                usage: wgpu::BufferUsages::STORAGE,
-            })
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: bytemuck::cast_slice(data),
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
         };
         let buf_a = storage("a", a);
         let buf_b = storage("b", b);
@@ -101,33 +109,55 @@ impl Gpu {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let params = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: bytemuck::bytes_of(&Params { n: n as u32, alpha, _pad: [0; 2] }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let params = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("params"),
+                contents: bytemuck::bytes_of(&Params {
+                    n: n as u32,
+                    alpha,
+                    _pad: [0; 2],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
-        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(task.entry_point()),
-            layout: None,
-            module: &module,
-            entry_point: Some(task.entry_point()),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("shader"),
+                source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(task.entry_point()),
+                layout: None,
+                module: &module,
+                entry_point: Some(task.entry_point()),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let layout = pipeline.get_bind_group_layout(0);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
 

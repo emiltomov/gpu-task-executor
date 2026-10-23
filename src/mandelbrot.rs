@@ -14,7 +14,7 @@ struct Params {
     _pad: [u32; 2],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct View {
     pub center_x: f32,
     pub center_y: f32,
@@ -25,7 +25,12 @@ pub struct View {
 
 impl Default for View {
     fn default() -> Self {
-        Self { center_x: -0.5, center_y: 0.0, scale: 0.05, max_iter: 200 }
+        Self {
+            center_x: -0.5,
+            center_y: 0.0,
+            scale: 0.05,
+            max_iter: 200,
+        }
     }
 }
 
@@ -35,18 +40,22 @@ pub struct Mandelbrot {
 
 impl Mandelbrot {
     pub fn new(gpu: &Gpu) -> Self {
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mandelbrot"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("mandelbrot.wgsl").into()),
-        });
-        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("mandelbrot"),
-            layout: None,
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let module = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("mandelbrot"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("mandelbrot.wgsl").into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("mandelbrot"),
+                layout: None,
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         Self { pipeline }
     }
 
@@ -65,25 +74,33 @@ impl Mandelbrot {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let params = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mandelbrot params"),
-            contents: bytemuck::bytes_of(&Params {
-                width,
-                height,
-                max_iter: view.max_iter,
-                scale: view.scale,
-                center_x: view.center_x,
-                center_y: view.center_y,
-                _pad: [0; 2],
-            }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let params = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mandelbrot params"),
+                contents: bytemuck::bytes_of(&Params {
+                    width,
+                    height,
+                    max_iter: view.max_iter,
+                    scale: view.scale,
+                    center_x: view.center_x,
+                    center_y: view.center_y,
+                    _pad: [0; 2],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
 

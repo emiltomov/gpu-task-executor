@@ -1,29 +1,128 @@
+mod automata;
+mod automata_ui;
 #[allow(dead_code)]
 mod gpu;
+mod gpuinfo;
 mod mandelbrot;
 
 use anyhow::Result;
+use automata::Kind;
+use automata_ui::{Run, Setup, SetupAction};
 use gpu::Gpu;
+use gpuinfo::{Monitor, Telemetry};
 use mandelbrot::{Mandelbrot, View};
+use std::time::{Duration, Instant};
+
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, List, ListState, Paragraph},
 };
 
-const MENU: [&str; 2] = ["Mandelbrot", "Exit"];
+const MENU: [&str; 4] = ["Mandelbrot", "Game of Life", "Lenia", "Exit"];
+const FRAME: Duration = Duration::from_millis(33);
 const DEFAULT_SCALE: f32 = 0.05;
 
 struct Renderer {
     gpu: Gpu,
     mandelbrot: Mandelbrot,
+    cache: Option<((u32, u32, View), Vec<u32>)>,
+}
+
+fn gib(bytes: u64) -> f64 {
+    bytes as f64 / (1u64 << 30) as f64
+}
+
+fn usage_color(pct: u32) -> Color {
+    match pct {
+        0..=50 => Color::Green,
+        51..=85 => Color::Yellow,
+        _ => Color::Red,
+    }
+}
+
+fn draw_header(
+    frame: &mut Frame,
+    area: Rect,
+    r: Option<&Renderer>,
+    telemetry: &Result<Telemetry, String>,
+) {
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut lines = Vec::new();
+    match r {
+        Some(r) => {
+            let i = &r.gpu.adapter_info;
+            lines.push(Line::from(vec![
+                Span::styled("Adapter: ", dim),
+                Span::raw(format!(
+                    "{} | {:?} | {:?}",
+                    i.name, i.backend, i.device_type
+                )),
+            ]));
+            if !i.driver.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("Driver:  ", dim),
+                    Span::raw(format!("{} {}", i.driver, i.driver_info)),
+                ]));
+            }
+        }
+        None => lines.push(Line::styled(
+            "No GPU adapter available",
+            Style::new().fg(Color::Red),
+        )),
+    }
+    match telemetry {
+        Ok(t) => {
+            let vram_pct = (t.vram_used as f64 / t.vram_total.max(1) as f64 * 100.0) as u32;
+            let mut spans = vec![
+                Span::styled("NVIDIA:  ", dim),
+                Span::raw(format!("{} | ", t.name)),
+                Span::raw(format!(
+                    "Cores {} | ",
+                    t.cores.map_or("n/a".into(), |c| c.to_string())
+                )),
+                Span::raw("Usage "),
+                Span::styled(
+                    format!("{}%", t.gpu_util),
+                    Style::new().fg(usage_color(t.gpu_util)),
+                ),
+                Span::raw(" | VRAM "),
+                Span::styled(
+                    format!(
+                        "{:.1}/{:.1} GiB ({vram_pct}%)",
+                        gib(t.vram_used),
+                        gib(t.vram_total)
+                    ),
+                    Style::new().fg(usage_color(vram_pct)),
+                ),
+            ];
+            if let Some(c) = t.temp_c {
+                spans.push(Span::raw(format!(" | {c}°C")));
+            }
+            if let Some(w) = t.power_w {
+                spans.push(Span::raw(format!(" | {w:.0} W")));
+            }
+            lines.push(Line::from(spans));
+        }
+        Err(e) => lines.push(Line::from(vec![
+            Span::styled("Telemetry: ", dim),
+            Span::raw(format!("unavailable ({e})")),
+        ])),
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" GPU ")),
+        area,
+    );
 }
 
 enum Screen {
     Menu,
     Mandelbrot(View),
+    Setup(Setup),
+    Run(Run),
 }
 
 fn color(iter: u32, max_iter: u32) -> Color {
@@ -35,9 +134,9 @@ fn color(iter: u32, max_iter: u32) -> Color {
     Color::Rgb(ch(0.0), ch(2.1), ch(4.2))
 }
 
-fn draw_menu(frame: &mut Frame, state: &mut ListState, error: Option<&str>) {
+fn draw_menu(frame: &mut Frame, area: Rect, state: &mut ListState, error: Option<&str>) {
     let [list_area, status] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let list = List::new(MENU)
         .block(Block::bordered().title(" GPU Task Executor "))
         .highlight_symbol("> ")
@@ -48,19 +147,32 @@ fn draw_menu(frame: &mut Frame, state: &mut ListState, error: Option<&str>) {
     }
 }
 
-fn draw_mandelbrot(frame: &mut Frame, r: &Renderer, view: View, error: &mut Option<String>) {
+fn draw_mandelbrot(
+    frame: &mut Frame,
+    area: Rect,
+    r: &mut Renderer,
+    view: View,
+    error: &mut Option<String>,
+) {
     let block = Block::bordered()
         .title(" Mandelbrot (GPU) ")
         .title_bottom(" arrows: pan  +/-: zoom  r: reset  q/Esc: back ");
-    let inner = block.inner(frame.area());
-    frame.render_widget(block, frame.area());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
     // Each cell shows two vertically stacked pixels via the upper-half block.
     let (w, h) = (inner.width as u32, inner.height as u32 * 2);
-    match r.mandelbrot.render(&r.gpu, w, h, view) {
-        Ok(data) => {
+    let key = (w, h, view);
+    if r.cache.as_ref().is_none_or(|(k, _)| *k != key) {
+        match r.mandelbrot.render(&r.gpu, w, h, view) {
+            Ok(data) => r.cache = Some((key, data)),
+            Err(e) => *error = Some(e.to_string()),
+        }
+    }
+    match &r.cache {
+        Some((_, data)) => {
             let buf = frame.buffer_mut();
             for cy in 0..inner.height {
                 for cx in 0..inner.width {
@@ -74,32 +186,79 @@ fn draw_mandelbrot(frame: &mut Frame, r: &Renderer, view: View, error: &mut Opti
                 }
             }
         }
-        Err(e) => *error = Some(e.to_string()),
+        None => {}
     }
 }
 
 fn zoomed(view: View, factor: f32) -> View {
     let scale = (view.scale * factor).clamp(1e-6, 1.0);
     let max_iter = (200.0 + 40.0 * (DEFAULT_SCALE / scale).log2().max(0.0)) as u32;
-    View { scale, max_iter, ..view }
+    View {
+        scale,
+        max_iter,
+        ..view
+    }
 }
 
 fn app(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut menu = ListState::default().with_selected(Some(0));
     let mut screen = Screen::Menu;
-    let mut renderer: Option<Renderer> = None;
+    let monitor = Monitor::new();
     let mut error: Option<String> = None;
+    let mut renderer = match Gpu::new() {
+        Ok(gpu) => {
+            let mandelbrot = Mandelbrot::new(&gpu);
+            Some(Renderer {
+                gpu,
+                mandelbrot,
+                cache: None,
+            })
+        }
+        Err(e) => {
+            error = Some(format!("GPU init failed: {e:#}"));
+            None
+        }
+    };
+
+    let mut telemetry = monitor.sample();
+    let mut sampled = Instant::now();
 
     loop {
-        terminal.draw(|f| match (&screen, &renderer) {
-            (Screen::Mandelbrot(view), Some(r)) => draw_mandelbrot(f, r, *view, &mut error),
-            _ => draw_menu(f, &mut menu, error.as_deref()),
+        if sampled.elapsed() >= Duration::from_secs(1) {
+            telemetry = monitor.sample();
+            sampled = Instant::now();
+        }
+        terminal.draw(|f| {
+            let [header, body] =
+                Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas(f.area());
+            draw_header(f, header, renderer.as_ref(), &telemetry);
+            match (&mut screen, renderer.as_mut()) {
+                (Screen::Mandelbrot(view), Some(r)) => {
+                    draw_mandelbrot(f, body, r, *view, &mut error)
+                }
+                (Screen::Run(run), Some(r)) => run.draw(f, body, &r.gpu, &mut error),
+                (Screen::Setup(setup), _) => setup.draw(f, body),
+                _ => draw_menu(f, body, &mut menu, error.as_deref()),
+            }
         })?;
         if error.is_some() {
             screen = Screen::Menu;
         }
 
-        let Event::Key(key) = event::read()? else { continue };
+        let timeout = if matches!(screen, Screen::Run(_)) {
+            FRAME
+        } else {
+            Duration::from_secs(1)
+        };
+        if !event::poll(timeout)? {
+            if let Screen::Run(run) = &mut screen {
+                run.due = true;
+            }
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -109,27 +268,33 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                 KeyCode::Down | KeyCode::Char('j') => menu.select_next(),
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Enter => match menu.selected() {
-                    Some(0) => {
+                    Some(0) if renderer.is_some() => {
                         error = None;
-                        if renderer.is_none() {
-                            match Gpu::new() {
-                                Ok(gpu) => {
-                                    let mandelbrot = Mandelbrot::new(&gpu);
-                                    renderer = Some(Renderer { gpu, mandelbrot });
-                                }
-                                Err(e) => {
-                                    error = Some(format!("GPU init failed: {e:#}"));
-                                    continue;
-                                }
-                            }
-                        }
                         screen = Screen::Mandelbrot(View::default());
                     }
-                    Some(1) => return Ok(()),
+                    Some(i @ (1 | 2)) if renderer.is_some() => {
+                        error = None;
+                        screen = Screen::Setup(Setup::new(if i == 1 {
+                            Kind::Life
+                        } else {
+                            Kind::Lenia
+                        }));
+                    }
+                    Some(3) => return Ok(()),
                     _ => {}
                 },
                 _ => {}
             },
+            Screen::Setup(setup) => match setup.handle_key(key.code) {
+                SetupAction::Back => screen = Screen::Menu,
+                SetupAction::Start => screen = Screen::Run(Run::new(setup.settings.clone())),
+                SetupAction::None => {}
+            },
+            Screen::Run(run) => {
+                if run.handle_key(key.code) {
+                    screen = Screen::Menu;
+                }
+            }
             Screen::Mandelbrot(view) => {
                 let step = view.scale * 8.0;
                 match key.code {
