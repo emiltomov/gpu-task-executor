@@ -159,6 +159,11 @@ pub struct Run {
     /// Set by the main loop when a frame interval elapsed.
     pub due: bool,
     step_once: bool,
+    /// Index into the Life patterns (never 0 = Random) used for spawning.
+    spawn_pattern: usize,
+    /// Grid area on screen, used to map mouse clicks to cells.
+    inner: Rect,
+    pending_spawn: Option<(i64, i64)>,
 }
 
 impl Run {
@@ -169,6 +174,21 @@ impl Run {
             paused: false,
             due: true,
             step_once: false,
+            spawn_pattern: 1,
+            inner: Rect::default(),
+            pending_spawn: None,
+        }
+    }
+
+    fn life(&self) -> bool {
+        self.settings.kind == Kind::Life
+    }
+
+    /// Spawns the selected pattern at the clicked cell (Life only).
+    pub fn handle_click(&mut self, col: u16, row: u16) {
+        let i = self.inner;
+        if self.life() && col >= i.x && row >= i.y && col < i.x + i.width && row < i.y + i.height {
+            self.pending_spawn = Some(((col - i.x) as i64 * 2 + 1, (row - i.y) as i64 * 4 + 2));
         }
     }
 
@@ -184,6 +204,18 @@ impl Run {
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Char('n') => self.step_once = true,
             KeyCode::Char('r') => self.sim = None,
+            KeyCode::Char('p') if self.life() => {
+                let n = Kind::Life.patterns().len();
+                self.spawn_pattern = self.spawn_pattern % (n - 1) + 1;
+            }
+            KeyCode::Char('s') if self.life() => {
+                if let Some(sim) = &self.sim {
+                    self.pending_spawn = Some((
+                        rand::random_range(0..sim.width as i64),
+                        rand::random_range(0..sim.height as i64),
+                    ));
+                }
+            }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.settings.steps_per_frame = (self.settings.steps_per_frame * 2).min(256)
             }
@@ -199,6 +231,7 @@ impl Run {
         let kind = self.settings.kind;
         let block = Block::bordered();
         let inner = block.inner(area);
+        self.inner = inner;
         if inner.width == 0 || inner.height == 0 {
             frame.render_widget(block, area);
             return;
@@ -217,6 +250,9 @@ impl Run {
         }
         let finished = self.finished();
         let sim = self.sim.as_mut().unwrap();
+        if let Some((x, y)) = self.pending_spawn.take() {
+            sim.spawn(gpu, self.spawn_pattern, x, y);
+        }
         if self.due && !self.paused && !finished || self.step_once {
             let remaining = match self.settings.generations {
                 0 => u64::MAX,
@@ -248,7 +284,14 @@ impl Run {
                 kind.title(),
                 self.settings.steps_per_frame
             ))
-            .title_bottom(" space: pause  n: step  +/-: speed  r: restart  q/Esc: back ");
+            .title_bottom(if kind == Kind::Life {
+                format!(
+                    " click/s: spawn {}  p: pattern  space: pause  n: step  +/-: speed  r: restart  q: back ",
+                    Kind::Life.patterns()[self.spawn_pattern]
+                )
+            } else {
+                " space: pause  n: step  +/-: speed  r: restart  q/Esc: back ".to_string()
+            });
         frame.render_widget(block, area);
 
         match sim.read(gpu) {

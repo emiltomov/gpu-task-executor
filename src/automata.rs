@@ -146,6 +146,22 @@ fn stamp(grid: &mut [f32], width: usize, height: usize, pattern: &str) {
     }
 }
 
+/// Live-cell coordinates of an ASCII pattern centred on `(cx, cy)`.
+fn pattern_cells(pattern: &str, cx: i64, cy: i64) -> Vec<(i64, i64)> {
+    let rows: Vec<&str> = pattern.lines().collect();
+    let pw = rows.iter().map(|r| r.len()).max().unwrap_or(0) as i64;
+    let (ox, oy) = (cx - pw / 2, cy - rows.len() as i64 / 2);
+    let mut cells = Vec::new();
+    for (y, row) in rows.iter().enumerate() {
+        for (x, ch) in row.chars().enumerate() {
+            if ch == 'O' {
+                cells.push((ox + x as i64, oy + y as i64));
+            }
+        }
+    }
+    cells
+}
+
 /// Normalised ring kernel `exp(4 - 1 / (r (1 - r)))` over `(2R+1)^2` cells.
 fn lenia_kernel(radius: u32) -> Vec<f32> {
     let side = 2 * radius as i32 + 1;
@@ -292,6 +308,18 @@ impl Automata {
         }
     }
 
+    /// Spawns Life pattern `pattern` (index into `patterns()`, not "Random") centred on `(cx, cy)`.
+    pub fn spawn(&self, gpu: &Gpu, pattern: usize, cx: i64, cy: i64) {
+        let alive: &[u8] = bytemuck::bytes_of(&1.0f32);
+        for (x, y) in pattern_cells(LIFE_PATTERNS[pattern].1, cx, cy) {
+            if x >= 0 && y >= 0 && x < self.width as i64 && y < self.height as i64 {
+                let offset = (y as u64 * self.width as u64 + x as u64) * 4;
+                gpu.queue
+                    .write_buffer(&self.cells[self.current], offset, alive);
+            }
+        }
+    }
+
     pub fn step(&mut self, gpu: &Gpu, n: u32) {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for _ in 0..n {
@@ -339,6 +367,22 @@ mod tests {
         stamp(&mut g, 7, 7, "OOO");
         assert_eq!(g.iter().filter(|&&c| c == 1.0).count(), 3);
         assert_eq!(&g[3 * 7 + 2..3 * 7 + 5], &[1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn pattern_cells_are_centred() {
+        assert_eq!(pattern_cells("OOO", 10, 5), vec![(9, 5), (10, 5), (11, 5)]);
+    }
+
+    #[test]
+    fn spawn_adds_cells_on_gpu() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut s = Settings::new(Kind::Life);
+        s.pattern = LIFE_PATTERNS.iter().position(|p| p.0 == "Blinker").unwrap();
+        let a = Automata::new(&gpu, &s, 20, 20);
+        let before = a.read(&gpu).unwrap().iter().sum::<f32>();
+        a.spawn(&gpu, 1, 3, 3); // glider, away from the centred blinker
+        assert_eq!(a.read(&gpu).unwrap().iter().sum::<f32>(), before + 5.0);
     }
 
     #[test]

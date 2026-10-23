@@ -15,7 +15,13 @@ use std::time::{Duration, Instant};
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    crossterm::{
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
+            MouseButton, MouseEventKind,
+        },
+        execute,
+    },
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -277,8 +283,17 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
             }
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Mouse(m) => {
+                if let (Screen::Run(run), MouseEventKind::Down(MouseButton::Left)) =
+                    (&mut screen, m.kind)
+                {
+                    run.handle_click(m.column, m.row);
+                }
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;
@@ -364,5 +379,10 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    ratatui::run(app)
+    ratatui::run(|terminal| {
+        execute!(std::io::stdout(), EnableMouseCapture)?;
+        let result = app(terminal);
+        execute!(std::io::stdout(), DisableMouseCapture)?;
+        result
+    })
 }
