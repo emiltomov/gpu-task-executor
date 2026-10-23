@@ -52,7 +52,7 @@ Keys:
 |--------|------|
 | Menu / Setup | `↑`/`k`, `↓`/`j`, `Enter`, `q`/`Esc` |
 | Mandelbrot | arrows pan, `+`/`-` zoom, `r` reset, `q`/`Esc` back |
-| Game of Life | left click spawns the selected pattern, `s` spawns it at a random spot, `p` cycles patterns, `space` pause, `n` step, `+`/`-` speed, `r` restart |
+| Game of Life | left click spawns the selected pattern, `s` spawns it under the mouse pointer (random spot if outside the grid), `p` cycles patterns, `space` pause, `n` step, `+`/`-` speed, `r` restart |
 
 ## Tests
 

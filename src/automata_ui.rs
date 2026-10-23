@@ -164,6 +164,8 @@ pub struct Run {
     /// Grid area on screen, used to map mouse clicks to cells.
     inner: Rect,
     pending_spawn: Option<(i64, i64)>,
+    /// Last known mouse position (terminal cells).
+    mouse: Option<(u16, u16)>,
 }
 
 impl Run {
@@ -177,6 +179,7 @@ impl Run {
             spawn_pattern: 1,
             inner: Rect::default(),
             pending_spawn: None,
+            mouse: None,
         }
     }
 
@@ -184,12 +187,29 @@ impl Run {
         self.settings.kind == Kind::Life
     }
 
+    fn cell_at(&self, col: u16, row: u16) -> Option<(i64, i64)> {
+        let i = self.inner;
+        (col >= i.x && row >= i.y && col < i.x + i.width && row < i.y + i.height)
+            .then(|| ((col - i.x) as i64 * 2 + 1, (row - i.y) as i64 * 4 + 2))
+    }
+
+    pub fn set_mouse(&mut self, col: u16, row: u16) {
+        self.mouse = Some((col, row));
+    }
+
     /// Spawns the selected pattern at the clicked cell (Life only).
     pub fn handle_click(&mut self, col: u16, row: u16) {
-        let i = self.inner;
-        if self.life() && col >= i.x && row >= i.y && col < i.x + i.width && row < i.y + i.height {
-            self.pending_spawn = Some(((col - i.x) as i64 * 2 + 1, (row - i.y) as i64 * 4 + 2));
+        self.set_mouse(col, row);
+        if self.life() {
+            self.pending_spawn = self.cell_at(col, row);
         }
+    }
+
+    /// Spawn point: under the mouse pointer, or random when it is outside the grid.
+    fn spawn_target(&self, width: i64, height: i64) -> (i64, i64) {
+        self.mouse
+            .and_then(|(c, r)| self.cell_at(c, r))
+            .unwrap_or_else(|| (rand::random_range(0..width), rand::random_range(0..height)))
     }
 
     fn finished(&self) -> bool {
@@ -210,10 +230,8 @@ impl Run {
             }
             KeyCode::Char('s') if self.life() => {
                 if let Some(sim) = &self.sim {
-                    self.pending_spawn = Some((
-                        rand::random_range(0..sim.width as i64),
-                        rand::random_range(0..sim.height as i64),
-                    ));
+                    self.pending_spawn =
+                        Some(self.spawn_target(sim.width as i64, sim.height as i64));
                 }
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -344,5 +362,31 @@ fn render_half_blocks(frame: &mut Frame, inner: Rect, data: &[f32], w: usize) {
                 .set_fg(palette(data[cy * 2 * w + cx]))
                 .set_bg(palette(data[(cy * 2 + 1) * w + cx]));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run() -> Run {
+        let mut r = Run::new(Settings::new(Kind::Life));
+        r.inner = Rect::new(2, 3, 10, 5);
+        r
+    }
+
+    #[test]
+    fn spawn_uses_mouse_inside_grid() {
+        let mut r = run();
+        r.set_mouse(4, 4);
+        assert_eq!(r.spawn_target(20, 20), (5, 6));
+    }
+
+    #[test]
+    fn spawn_is_random_outside_grid() {
+        let mut r = run();
+        r.set_mouse(50, 50);
+        let (x, y) = r.spawn_target(20, 20);
+        assert!((0..20).contains(&x) && (0..20).contains(&y));
     }
 }

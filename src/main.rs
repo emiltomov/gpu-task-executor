@@ -286,10 +286,13 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
         let key = match event::read()? {
             Event::Key(key) => key,
             Event::Mouse(m) => {
-                if let (Screen::Run(run), MouseEventKind::Down(MouseButton::Left)) =
-                    (&mut screen, m.kind)
-                {
-                    run.handle_click(m.column, m.row);
+                if let Screen::Run(run) = &mut screen {
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            run.handle_click(m.column, m.row)
+                        }
+                        _ => run.set_mouse(m.column, m.row),
+                    }
                 }
                 continue;
             }
