@@ -77,6 +77,23 @@ impl Gpu {
         })
     }
 
+    pub fn with_adapter(index: usize) -> Result<Self> {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+            .into_iter()
+            .nth(index)
+            .context("GPU adapter not found")?;
+        let adapter_info = adapter.get_info();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .context("failed to create GPU device")?;
+        Ok(Self {
+            device,
+            queue,
+            adapter_info,
+        })
+    }
+
     pub fn run(&self, task: Task, a: &[f32], b: &[f32], alpha: f32) -> Result<RunResult> {
         let n = a.len();
         let groups = (n as u32).div_ceil(WORKGROUP_SIZE);

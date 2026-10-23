@@ -22,7 +22,7 @@ use ratatui::{
     widgets::{Block, List, ListState, Paragraph},
 };
 
-const MENU: [&str; 4] = ["Mandelbrot", "Game of Life", "Lenia", "Exit"];
+const MENU: [&str; 5] = ["Mandelbrot", "Game of Life", "Lenia", "Select GPU", "Exit"];
 const FRAME: Duration = Duration::from_millis(33);
 const DEFAULT_SCALE: f32 = 0.05;
 
@@ -38,8 +38,8 @@ fn gib(bytes: u64) -> f64 {
 
 fn usage_color(pct: u32) -> Color {
     match pct {
-        0..=50 => Color::Green,
-        51..=85 => Color::Yellow,
+        0..=50 => Color::Rgb(0, 130, 0),
+        51..=85 => Color::Rgb(180, 100, 0),
         _ => Color::Red,
     }
 }
@@ -50,7 +50,7 @@ fn draw_header(
     r: Option<&Renderer>,
     telemetry: &Result<Telemetry, String>,
 ) {
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = Style::new().fg(Color::Rgb(90, 90, 100));
     let mut lines = Vec::new();
     match r {
         Some(r) => {
@@ -113,7 +113,9 @@ fn draw_header(
         ])),
     }
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" GPU ")),
+        Paragraph::new(lines)
+            .style(Style::new().bg(Color::Rgb(230, 230, 235)).fg(Color::Black))
+            .block(Block::bordered().title(" GPU ")),
         area,
     );
 }
@@ -123,6 +125,31 @@ enum Screen {
     Mandelbrot(View),
     Setup(Setup),
     Run(Run),
+    Gpus(Vec<wgpu::AdapterInfo>, ListState),
+}
+
+fn make_renderer(gpu: Gpu) -> Renderer {
+    let mandelbrot = Mandelbrot::new(&gpu);
+    Renderer {
+        gpu,
+        mandelbrot,
+        cache: None,
+    }
+}
+
+fn draw_gpus(frame: &mut Frame, area: Rect, infos: &[wgpu::AdapterInfo], state: &mut ListState) {
+    let items = infos
+        .iter()
+        .map(|i| format!("{} | {:?} | {:?}", i.name, i.backend, i.device_type));
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .title(" Select GPU ")
+                .title_bottom(" up/down: move  Enter: select  q/Esc: back "),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(list, area, state);
 }
 
 fn color(iter: u32, max_iter: u32) -> Color {
@@ -206,14 +233,7 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
     let monitor = Monitor::new();
     let mut error: Option<String> = None;
     let mut renderer = match Gpu::new() {
-        Ok(gpu) => {
-            let mandelbrot = Mandelbrot::new(&gpu);
-            Some(Renderer {
-                gpu,
-                mandelbrot,
-                cache: None,
-            })
-        }
+        Ok(gpu) => Some(make_renderer(gpu)),
         Err(e) => {
             error = Some(format!("GPU init failed: {e:#}"));
             None
@@ -238,6 +258,7 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 (Screen::Run(run), Some(r)) => run.draw(f, body, &r.gpu, &mut error),
                 (Screen::Setup(setup), _) => setup.draw(f, body),
+                (Screen::Gpus(infos, state), _) => draw_gpus(f, body, infos, state),
                 _ => draw_menu(f, body, &mut menu, error.as_deref()),
             }
         })?;
@@ -280,7 +301,18 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                             Kind::Lenia
                         }));
                     }
-                    Some(3) => return Ok(()),
+                    Some(3) => {
+                        let infos = gpu::list_adapters();
+                        let current = renderer.as_ref().and_then(|r| {
+                            infos.iter().position(|i| {
+                                i.name == r.gpu.adapter_info.name
+                                    && i.backend == r.gpu.adapter_info.backend
+                            })
+                        });
+                        let state = ListState::default().with_selected(current.or(Some(0)));
+                        screen = Screen::Gpus(infos, state);
+                    }
+                    Some(4) => return Ok(()),
                     _ => {}
                 },
                 _ => {}
@@ -289,6 +321,24 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                 SetupAction::Back => screen = Screen::Menu,
                 SetupAction::Start => screen = Screen::Run(Run::new(setup.settings.clone())),
                 SetupAction::None => {}
+            },
+            Screen::Gpus(infos, state) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => state.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => state.select_next(),
+                KeyCode::Char('q') | KeyCode::Esc => screen = Screen::Menu,
+                KeyCode::Enter => {
+                    if let Some(i) = state.selected().filter(|&i| i < infos.len()) {
+                        match Gpu::with_adapter(i) {
+                            Ok(gpu) => {
+                                renderer = Some(make_renderer(gpu));
+                                error = None;
+                            }
+                            Err(e) => error = Some(format!("GPU init failed: {e:#}")),
+                        }
+                        screen = Screen::Menu;
+                    }
+                }
+                _ => {}
             },
             Screen::Run(run) => {
                 if run.handle_key(key.code) {
