@@ -3,6 +3,10 @@ name = "gpu-task-executor"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "gtu"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }

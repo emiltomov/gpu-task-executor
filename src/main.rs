@@ -1,5 +1,6 @@
 mod automata;
 mod automata_ui;
+mod cli;
 mod editor;
 #[allow(dead_code)]
 mod gpu;
@@ -11,6 +12,7 @@ mod matrix_ui;
 use anyhow::Result;
 use automata::Kind;
 use automata_ui::{Run, Setup, SetupAction};
+use clap::Parser;
 use gpu::Gpu;
 use gpuinfo::{Monitor, Telemetry};
 use mandelbrot::{Mandelbrot, View};
@@ -318,12 +320,12 @@ fn zoomed(view: View, factor: f32) -> View {
     }
 }
 
-fn app(terminal: &mut DefaultTerminal) -> Result<()> {
+fn app(terminal: &mut DefaultTerminal, gpu_index: Option<usize>) -> Result<()> {
     let mut menu = ListState::default().with_selected(Some(0));
     let mut screen = Screen::Menu;
     let monitor = Monitor::new();
     let mut error: Option<String> = None;
-    let mut renderer = match Gpu::new() {
+    let mut renderer = match cli::open_gpu(gpu_index) {
         Ok(gpu) => Some(make_renderer(gpu)),
         Err(e) => {
             error = Some(format!("GPU init failed: {e:#}"));
@@ -493,9 +495,17 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let args = cli::Cli::parse();
+    if args.is_batch() {
+        if let Err(e) = cli::run(&args) {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     ratatui::run(|terminal| {
         execute!(std::io::stdout(), EnableMouseCapture)?;
-        let result = app(terminal);
+        let result = app(terminal, args.gpu);
         execute!(std::io::stdout(), DisableMouseCapture)?;
         result
     })

@@ -4,7 +4,7 @@ Rust TUI app (`ratatui`) that runs compute workloads on the GPU via `wgpu` (WGSL
 
 ## Commands
 
-- Build/run: `cargo build`, `cargo run` (needs a real terminal)
+- Build/run: `cargo build`, `cargo run` (needs a real terminal); the binary is named `gtu`. `cargo run -- -i m.txt -e e.txt` runs the matrix CLI without UI (`cli.rs`).
 - Test: `cargo test`; single test: `cargo test blinker_oscillates_on_gpu`
 - GPU tests return early (pass) when no adapter is available.
 
