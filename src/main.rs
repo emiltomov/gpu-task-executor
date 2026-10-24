@@ -1,5 +1,6 @@
 mod automata;
 mod automata_ui;
+mod editor;
 #[allow(dead_code)]
 mod gpu;
 mod gpuinfo;
@@ -28,7 +29,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListState, Paragraph},
+    widgets::{Block, Clear, List, ListState, Paragraph},
 };
 
 const MENU: [&str; 6] = [
@@ -162,7 +163,7 @@ fn draw_gpus(frame: &mut Frame, area: Rect, infos: &[wgpu::AdapterInfo], state: 
         .block(
             Block::bordered()
                 .title(" Select GPU ")
-                .title_bottom(" up/down: move  Enter: select  q/Esc: back "),
+                .title_bottom(" up/down: move  Enter: select  F1: help  q/Esc: back "),
         )
         .highlight_symbol("> ")
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
@@ -176,6 +177,79 @@ fn color(iter: u32, max_iter: u32) -> Color {
     let t = iter as f32 * 0.1;
     let ch = |phase: f32| (127.5 + 127.5 * (t + phase).sin()) as u8;
     Color::Rgb(ch(0.0), ch(2.1), ch(4.2))
+}
+
+fn help_text(screen: &Screen) -> (&'static str, &'static [&'static str]) {
+    match screen {
+        Screen::Menu | Screen::Gpus(..) | Screen::Setup(_) => (
+            "Menu / lists",
+            &[
+                "Up/k, Down/j   select",
+                "Left/Right     change a setup value",
+                "Enter          open / confirm",
+                "q, Esc         back / quit",
+            ],
+        ),
+        Screen::Mandelbrot(_) => (
+            "Mandelbrot",
+            &[
+                "Arrows   pan",
+                "+ / -    zoom",
+                "r        reset view",
+                "q, Esc   back",
+            ],
+        ),
+        Screen::Run(_) => (
+            "Simulation",
+            &[
+                "space    pause / resume",
+                "n        single step",
+                "+ / -    change speed",
+                "r        restart",
+                "Life: click or s spawn the pattern at the mouse pointer",
+                "      (s spawns randomly if the pointer is outside the grid)",
+                "Life: p  next pattern",
+                "q, Esc   back",
+            ],
+        ),
+        Screen::Matrix(_) => matrix_ui::HELP,
+    }
+}
+
+fn draw_help(frame: &mut Frame, area: Rect, screen: &Screen) {
+    let (title, lines) = help_text(screen);
+    let width = lines
+        .iter()
+        .map(|l| l.len())
+        .max()
+        .unwrap_or(0)
+        .max(title.len()) as u16
+        + 4;
+    let height = lines.len() as u16 + 4;
+    let [_, row, _] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(height.min(area.height)),
+        Constraint::Min(0),
+    ])
+    .flex(ratatui::layout::Flex::Center)
+    .areas(area);
+    let [_, popup, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(width.min(area.width)),
+        Constraint::Min(0),
+    ])
+    .flex(ratatui::layout::Flex::Center)
+    .areas(row);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines.iter().map(|l| Line::from(*l)).collect::<Vec<_>>()).block(
+            Block::bordered()
+                .title(format!(" Help: {title} "))
+                .title_bottom(" any key: close ")
+                .border_style(Style::new().fg(Color::Cyan)),
+        ),
+        popup,
+    );
 }
 
 fn draw_menu(frame: &mut Frame, area: Rect, state: &mut ListState, error: Option<&str>) {
@@ -200,7 +274,7 @@ fn draw_mandelbrot(
 ) {
     let block = Block::bordered()
         .title(" Mandelbrot (GPU) ")
-        .title_bottom(" arrows: pan  +/-: zoom  r: reset  q/Esc: back ");
+        .title_bottom(" arrows: pan  +/-: zoom  r: reset  F1: help  q/Esc: back ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -257,6 +331,7 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
         }
     };
 
+    let mut help = false;
     let mut telemetry = monitor.sample();
     let mut sampled = Instant::now();
 
@@ -278,6 +353,9 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                 (Screen::Matrix(m), _) => m.draw(f, body),
                 (Screen::Gpus(infos, state), _) => draw_gpus(f, body, infos, state),
                 _ => draw_menu(f, body, &mut menu, error.as_deref()),
+            }
+            if help {
+                draw_help(f, body, &screen);
             }
         })?;
         if error.is_some() {
@@ -311,6 +389,16 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
             _ => continue,
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if help {
+            help = false;
+            continue;
+        }
+        // The matrix editor types text, so it uses F1 only.
+        let typing = matches!(screen, Screen::Matrix(_));
+        if key.code == KeyCode::F(1) || (key.code == KeyCode::Char('h') && !typing) {
+            help = true;
             continue;
         }
         match &mut screen {
@@ -376,7 +464,7 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
             },
             Screen::Matrix(m) => {
                 if let Some(r) = renderer.as_ref()
-                    && m.handle_key(key.code, &r.gpu)
+                    && m.handle_key(key, &r.gpu)
                 {
                     screen = Screen::Menu;
                 }

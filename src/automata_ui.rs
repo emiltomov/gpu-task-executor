@@ -143,7 +143,7 @@ impl Setup {
                 Block::bordered()
                     .title(format!(" {} setup ", self.settings.kind.title()))
                     .title_bottom(
-                        " up/down: select  left/right: change  Enter: start  q/Esc: back ",
+                        " up/down: select  left/right: change  Enter: start  F1: help  q/Esc: back ",
                     ),
             )
             .highlight_symbol("> ")
@@ -304,11 +304,11 @@ impl Run {
             ))
             .title_bottom(if kind == Kind::Life {
                 format!(
-                    " click/s: spawn {}  p: pattern  space: pause  n: step  +/-: speed  r: restart  q: back ",
+                    " click/s: spawn {}  p: pattern  space: pause  n: step  +/-: speed  r: restart  F1: help  q: back ",
                     Kind::Life.patterns()[self.spawn_pattern]
                 )
             } else {
-                " space: pause  n: step  +/-: speed  r: restart  q/Esc: back ".to_string()
+                " space: pause  n: step  +/-: speed  r: restart  F1: help  q/Esc: back ".to_string()
             });
         frame.render_widget(block, area);
 

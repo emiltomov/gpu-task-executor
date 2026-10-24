@@ -41,8 +41,14 @@ impl Matrix {
         self.rows == 1 && self.cols == 1
     }
 
-    /// Parses rows separated by `;`, values separated by spaces or commas.
+    /// Parses `[1 2; 3 4]` (brackets optional): rows separated by `;`, values by spaces or commas.
     pub fn parse(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let text = match (text.strip_prefix('['), text.ends_with(']')) {
+            (Some(t), true) => &t[..t.len() - 1],
+            (None, false) => text,
+            _ => bail!("unbalanced '[' ']'"),
+        };
         let mut data = Vec::new();
         let mut cols = 0;
         let mut rows = 0;
@@ -72,6 +78,16 @@ impl Matrix {
         Ok(Self { rows, cols, data })
     }
 
+    /// Full-precision `[1 2; 3 4]` literal, readable by [`Matrix::parse`].
+    pub fn to_literal(&self) -> String {
+        let rows: Vec<String> = self
+            .data
+            .chunks(self.cols)
+            .map(|r| r.iter().map(f32::to_string).collect::<Vec<_>>().join(" "))
+            .collect();
+        format!("[{}]", rows.join("; "))
+    }
+
     pub fn row_strings(&self) -> Vec<String> {
         let cells: Vec<String> = self.data.iter().map(|&v| fmt_num(v)).collect();
         let width = cells.iter().map(|c| c.len()).max().unwrap_or(0);
@@ -97,17 +113,40 @@ fn fmt_num(v: f32) -> String {
     }
 }
 
-/// Parses lines like `A = 1 2; 3 4` (blank lines and `#` comments are skipped).
+const EXPR_PREFIX: &str = "# expr:";
+const MAX_INCLUDE_DEPTH: u32 = 8;
+
+/// Parses lines like `A = [1 2; 3 4]` (blank lines and `#` comments are skipped).
+/// `include path` pulls in the matrices of another file.
 pub fn parse_definitions(text: &str) -> Result<HashMap<String, Matrix>> {
     let mut vars = HashMap::new();
+    parse_into(text, &mut vars, 0)?;
+    Ok(vars)
+}
+
+fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Result<()> {
     for (n, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.starts_with("output ") {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("include ") {
+            let path = path.trim();
+            if depth >= MAX_INCLUDE_DEPTH {
+                bail!("line {}: includes nested too deeply", n + 1);
+            }
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("line {}: cannot read '{path}'", n + 1))?;
+            parse_into(&content, vars, depth + 1)
+                .with_context(|| format!("in included file '{path}'"))?;
+            continue;
+        }
         let (name, body) = line
             .split_once('=')
-            .with_context(|| format!("line {}: expected NAME = values", n + 1))?;
+            .with_context(|| format!("line {}: expected NAME = [values]", n + 1))?;
         let name = name.trim();
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             bail!("line {}: bad name '{name}'", n + 1);
@@ -115,7 +154,41 @@ pub fn parse_definitions(text: &str) -> Result<HashMap<String, Matrix>> {
         let m = Matrix::parse(body).with_context(|| format!("line {}", n + 1))?;
         vars.insert(name.to_string(), m);
     }
-    Ok(vars)
+    Ok(())
+}
+
+/// Path from the first `output path` line of the definitions, if any.
+pub fn output_path(defs: &str) -> Option<String> {
+    defs.lines()
+        .find_map(|l| l.trim().strip_prefix("output "))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+}
+
+/// Saves the definitions plus the expression (as a `# expr:` comment, so the file stays includable).
+pub fn save_input(path: &str, defs: &str, expr: &str) -> Result<()> {
+    let text = format!("{}\n{EXPR_PREFIX} {expr}\n", defs.trim_end());
+    std::fs::write(path, text).with_context(|| format!("cannot write '{path}'"))
+}
+
+/// Saves a result as `result = [..]`, so the file can be opened or included later.
+pub fn save_result(path: &str, m: &Matrix) -> Result<()> {
+    std::fs::write(path, format!("result = {}\n", m.to_literal()))
+        .with_context(|| format!("cannot write '{path}'"))
+}
+
+/// Returns `(definitions, expression)` from a file written by [`save_input`] (or any definitions file).
+pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read '{path}'"))?;
+    let mut expr = None;
+    let mut defs = Vec::new();
+    for line in text.lines() {
+        match line.trim().strip_prefix(EXPR_PREFIX) {
+            Some(e) => expr = Some(e.trim().to_string()),
+            None => defs.push(line),
+        }
+    }
+    Ok((defs.join("\n").trim_end().to_string(), expr))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -474,7 +547,7 @@ mod tests {
         }
     }
 
-    const DEFS: &str = "A = 1 2; 3 4\nB = 0 1; 1 0\nC = 1 2 3";
+    const DEFS: &str = "A = [1 2; 3 4]\nB = [0 1; 1 0]\nC = [1 2 3]";
 
     #[test]
     fn composes_operations_with_precedence() {
@@ -490,8 +563,41 @@ mod tests {
     }
 
     #[test]
+    fn saves_loads_and_includes_files() {
+        let dir = std::env::temp_dir().join(format!("gte-matrix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("in.txt");
+        let path = file.to_str().unwrap();
+        save_input(path, "A = [1 2; 3 4]", "A'").unwrap();
+        let (defs, expr) = load_input(path).unwrap();
+        assert_eq!(defs, "A = [1 2; 3 4]");
+        assert_eq!(expr.as_deref(), Some("A'"));
+
+        let m = evaluate(&format!("include {path}\nB = [1 0; 0 1]"), "A * B", &Cpu).unwrap();
+        assert_eq!(m.data, vec![1.0, 2.0, 3.0, 4.0]);
+        let out = dir.join("out.txt");
+        let out = out.to_str().unwrap();
+        save_result(out, &m).unwrap();
+        let back = evaluate(&format!("include {out}"), "result", &Cpu).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(
+            output_path("A = [1]\n output  r.txt "),
+            Some("r.txt".into())
+        );
+        assert_eq!(output_path("A = [1]"), None);
+        assert!(evaluate("output r.txt\nA = [1]", "A", &Cpu).is_ok());
+        assert!(evaluate("include /nonexistent/x.txt", "1", &Cpu).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn reports_errors() {
         assert!(Matrix::parse("1 2; 3").is_err());
+        assert!(Matrix::parse("[1 2").is_err());
+        assert_eq!(
+            Matrix::parse("[1,2;3,4]").unwrap(),
+            Matrix::parse("1 2; 3 4").unwrap()
+        );
         assert!(evaluate(DEFS, "A + Z", &Cpu).is_err());
         assert!(evaluate(DEFS, "(A", &Cpu).is_err());
     }

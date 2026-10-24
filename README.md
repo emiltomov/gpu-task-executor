@@ -7,7 +7,7 @@ A Rust terminal UI (`ratatui`) that runs compute workloads on the GPU via `wgpu`
 - **Mandelbrot** – per-pixel iteration counts computed on the GPU; pan and zoom.
 - **Game of Life** – rendered with braille characters (2x4 cells per character).
 - **Lenia** – continuous cellular automaton rendered with half blocks (1x2).
-- **Matrices** – define matrices (`A = 1 2; 3 4`) and compose operations in one expression, e.g. `(A + B) * C' - 2 * A`. Supports `+ - *` (matrix product; a number scales), `'` transpose, unary `-`, parentheses. Each step runs on the GPU.
+- **Matrices** – define matrices (`A = [1 2; 3 4]`) and compose operations in one expression, e.g. `(A + B) * C' - 2 * A`. Supports `+ - *` (matrix product; a number scales), `'` transpose, unary `-`, parentheses. Each step runs on the GPU.
 - GPU info header on every screen, with NVML telemetry (sampled at most once per second; shows "unavailable" if NVML is missing).
 
 Automata state stays on the GPU (ping-pong storage buffers) and is read back only for drawing. Grid size follows the terminal; resizing restarts the simulation.
@@ -47,13 +47,13 @@ cargo build --release  # optimized
 cargo run --release   # needs a real terminal
 ```
 
-Keys:
+Keys (`F1` opens a help window on every screen):
 
 | Screen | Keys |
 |--------|------|
 | Menu / Setup | `↑`/`k`, `↓`/`j`, `Enter`, `q`/`Esc` |
 | Mandelbrot | arrows pan, `+`/`-` zoom, `r` reset, `q`/`Esc` back |
-| Matrices | `Tab` switch field, `Enter` (in expression) or `F5` calculate, `Esc` back |
+| Matrices | `Tab` switch field, arrows/Home/End move (Shift selects), `Ctrl+C`/`X`/`V`/`A` copy/cut/paste/select all, `Enter` (in expression) or `F5` calculate, `Ctrl+S` save input, `Ctrl+R` save result (as `result = [...]`), or put a line `output path` in the definitions to save the result there on every calculation, `Ctrl+O` open file, `Esc` back. A definitions line `include path` loads the matrices of another file; saved files keep the expression in a `# expr:` comment |
 | Game of Life | left click spawns the selected pattern, `s` spawns it under the mouse pointer (random spot if outside the grid), `p` cycles patterns, `space` pause, `n` step, `+`/`-` speed, `r` restart |
 
 ## Tests
