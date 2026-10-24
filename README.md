@@ -7,6 +7,7 @@ A Rust terminal UI (`ratatui`) that runs compute workloads on the GPU via `wgpu`
 - **Mandelbrot** – per-pixel iteration counts computed on the GPU; pan and zoom.
 - **Game of Life** – rendered with braille characters (2x4 cells per character).
 - **Lenia** – continuous cellular automaton rendered with half blocks (1x2).
+- **Matrices** – define matrices (`A = 1 2; 3 4`) and compose operations in one expression, e.g. `(A + B) * C' - 2 * A`. Supports `+ - *` (matrix product; a number scales), `'` transpose, unary `-`, parentheses. Each step runs on the GPU.
 - GPU info header on every screen, with NVML telemetry (sampled at most once per second; shows "unavailable" if NVML is missing).
 
 Automata state stays on the GPU (ping-pong storage buffers) and is read back only for drawing. Grid size follows the terminal; resizing restarts the simulation.
@@ -52,6 +53,7 @@ Keys:
 |--------|------|
 | Menu / Setup | `↑`/`k`, `↓`/`j`, `Enter`, `q`/`Esc` |
 | Mandelbrot | arrows pan, `+`/`-` zoom, `r` reset, `q`/`Esc` back |
+| Matrices | `Tab` switch field, `Enter` (in expression) or `F5` calculate, `Esc` back |
 | Game of Life | left click spawns the selected pattern, `s` spawns it under the mouse pointer (random spot if outside the grid), `p` cycles patterns, `space` pause, `n` step, `+`/`-` speed, `r` restart |
 
 ## Tests
@@ -69,4 +71,5 @@ GPU tests pass early when no adapter is available.
 - `src/gpu.rs` – shared device, queue and adapter info
 - `src/mandelbrot.rs`, `mandelbrot.wgsl` – Mandelbrot compute
 - `src/automata.rs`, `automata.wgsl` – Life and Lenia
+- `src/matrix.rs`, `matrix.wgsl`, `matrix_ui.rs` – matrix expression parser, GPU ops, screen
 - `src/automata_ui.rs` – setup form and run screen

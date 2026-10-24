@@ -4,6 +4,8 @@ mod automata_ui;
 mod gpu;
 mod gpuinfo;
 mod mandelbrot;
+mod matrix;
+mod matrix_ui;
 
 use anyhow::Result;
 use automata::Kind;
@@ -11,6 +13,7 @@ use automata_ui::{Run, Setup, SetupAction};
 use gpu::Gpu;
 use gpuinfo::{Monitor, Telemetry};
 use mandelbrot::{Mandelbrot, View};
+use matrix_ui::MatrixUi;
 use std::time::{Duration, Instant};
 
 use ratatui::{
@@ -28,7 +31,14 @@ use ratatui::{
     widgets::{Block, List, ListState, Paragraph},
 };
 
-const MENU: [&str; 5] = ["Mandelbrot", "Game of Life", "Lenia", "Select GPU", "Exit"];
+const MENU: [&str; 6] = [
+    "Mandelbrot",
+    "Game of Life",
+    "Lenia",
+    "Matrices",
+    "Select GPU",
+    "Exit",
+];
 const FRAME: Duration = Duration::from_millis(33);
 const DEFAULT_SCALE: f32 = 0.05;
 
@@ -132,6 +142,7 @@ enum Screen {
     Setup(Setup),
     Run(Run),
     Gpus(Vec<wgpu::AdapterInfo>, ListState),
+    Matrix(MatrixUi),
 }
 
 fn make_renderer(gpu: Gpu) -> Renderer {
@@ -264,6 +275,7 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 (Screen::Run(run), Some(r)) => run.draw(f, body, &r.gpu, &mut error),
                 (Screen::Setup(setup), _) => setup.draw(f, body),
+                (Screen::Matrix(m), _) => m.draw(f, body),
                 (Screen::Gpus(infos, state), _) => draw_gpus(f, body, infos, state),
                 _ => draw_menu(f, body, &mut menu, error.as_deref()),
             }
@@ -319,7 +331,11 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                             Kind::Lenia
                         }));
                     }
-                    Some(3) => {
+                    Some(3) if renderer.is_some() => {
+                        error = None;
+                        screen = Screen::Matrix(MatrixUi::new());
+                    }
+                    Some(4) => {
                         let infos = gpu::list_adapters();
                         let current = renderer.as_ref().and_then(|r| {
                             infos.iter().position(|i| {
@@ -330,7 +346,7 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                         let state = ListState::default().with_selected(current.or(Some(0)));
                         screen = Screen::Gpus(infos, state);
                     }
-                    Some(4) => return Ok(()),
+                    Some(5) => return Ok(()),
                     _ => {}
                 },
                 _ => {}
@@ -358,6 +374,13 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 _ => {}
             },
+            Screen::Matrix(m) => {
+                if let Some(r) = renderer.as_ref()
+                    && m.handle_key(key.code, &r.gpu)
+                {
+                    screen = Screen::Menu;
+                }
+            }
             Screen::Run(run) => {
                 if run.handle_key(key.code) {
                     screen = Screen::Menu;
