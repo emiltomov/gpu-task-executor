@@ -61,6 +61,8 @@ Keys (`F1` opens a help window on every screen):
 The binary is `gtu`. Giving `--input`, `--expression` or `--output` evaluates a matrix expression on the GPU and exits; with no options the interactive UI starts. `gtu -h` shows the help.
 
 ```sh
+gtu --list-gpus                                       # index: name (backend, type)
+gtu -g 1 -i matrices.txt -e expression.txt            # run on GPU 1 (-g also selects the GPU for the UI)
 gtu -i matrices.txt -e expression.txt -o result.txt   # write the result to a file
 gtu -i matrices.txt -e expression.txt                 # print "result = [..]" to stdout
 gtu -i matrices.txt -e expression.txt | gtu -i - -e next.txt   # pipe: use `result` in next.txt

@@ -1,4 +1,4 @@
-use crate::gpu::Gpu;
+use crate::gpu::{Gpu, list_adapters};
 use crate::matrix::{evaluate, result_text, save_result, split_input};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -17,6 +17,8 @@ Expression file: + - * ( ) ' (transpose); a number scales, e.g. (A + B) * C' - 2
 Use '-' for stdin. The result is printed as 'result = [..]' (or written to --output),
 so it can be piped into another run:
 
+  gtu --list-gpus                    # index: name (backend, type)
+  gtu -g 1 -i matrices.txt -e expression.txt   # run on GPU 1 (also selects the GPU for the UI)
   gtu -i matrices.txt -e expression.txt -o result.txt
   gtu -i matrices.txt -e expression.txt | gtu -i - -e next.txt
   echo \"A * B\" | gtu -i matrices.txt -e -
@@ -37,11 +39,19 @@ pub struct Cli {
     /// File to write the result to (default: print to stdout)
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
+
+    /// GPU to use, by index from --list-gpus (default: automatic high-performance choice)
+    #[arg(short, long, value_name = "INDEX")]
+    pub gpu: Option<usize>,
+
+    /// List the GPUs visible to gtu and exit
+    #[arg(short, long)]
+    list_gpus: bool,
 }
 
 impl Cli {
     pub fn is_batch(&self) -> bool {
-        self.input.is_some() || self.expression.is_some() || self.output.is_some()
+        self.input.is_some() || self.expression.is_some() || self.output.is_some() || self.list_gpus
     }
 }
 
@@ -66,7 +76,29 @@ fn clean_expression(text: &str) -> String {
         .join(" ")
 }
 
+pub fn open_gpu(index: Option<usize>) -> Result<Gpu> {
+    match index {
+        None => Gpu::new(),
+        Some(i) => Gpu::with_adapter(i)
+            .with_context(|| format!("GPU {i} not available; see `gtu --list-gpus`")),
+    }
+}
+
+fn list_gpus() {
+    let adapters = list_adapters();
+    if adapters.is_empty() {
+        println!("no GPUs found");
+    }
+    for (i, a) in adapters.iter().enumerate() {
+        println!("{i}: {} ({:?}, {:?})", a.name, a.backend, a.device_type);
+    }
+}
+
 pub fn run(cli: &Cli) -> Result<()> {
+    if cli.list_gpus {
+        list_gpus();
+        return Ok(());
+    }
     let input = cli.input.as_deref().unwrap_or("-");
     if input == "-" && cli.expression.as_deref() == Some("-") {
         bail!("--input and --expression cannot both read from stdin");
@@ -79,7 +111,7 @@ pub fn run(cli: &Cli) -> Result<()> {
     if expr.is_empty() {
         bail!("expression is empty");
     }
-    let gpu = Gpu::new()?;
+    let gpu = open_gpu(cli.gpu)?;
     let result = evaluate(&defs, &expr, &gpu)?;
     match &cli.output {
         Some(path) => save_result(path, &result),
@@ -97,6 +129,15 @@ mod tests {
     #[test]
     fn expression_skips_comments_and_joins_lines() {
         assert_eq!(clean_expression("# note\nA *\n  B\n\n"), "A * B");
+    }
+
+    #[test]
+    fn gpu_option_parses_and_list_is_batch() {
+        let cli = Cli::parse_from(["gtu", "-g", "2"]);
+        assert_eq!(cli.gpu, Some(2));
+        assert!(!cli.is_batch());
+        assert!(Cli::parse_from(["gtu", "--list-gpus"]).is_batch());
+        assert!(open_gpu(Some(9999)).is_err());
     }
 
     #[test]

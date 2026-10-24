@@ -320,12 +320,12 @@ fn zoomed(view: View, factor: f32) -> View {
     }
 }
 
-fn app(terminal: &mut DefaultTerminal) -> Result<()> {
+fn app(terminal: &mut DefaultTerminal, gpu_index: Option<usize>) -> Result<()> {
     let mut menu = ListState::default().with_selected(Some(0));
     let mut screen = Screen::Menu;
     let monitor = Monitor::new();
     let mut error: Option<String> = None;
-    let mut renderer = match Gpu::new() {
+    let mut renderer = match cli::open_gpu(gpu_index) {
         Ok(gpu) => Some(make_renderer(gpu)),
         Err(e) => {
             error = Some(format!("GPU init failed: {e:#}"));
@@ -505,7 +505,7 @@ fn main() -> Result<()> {
     }
     ratatui::run(|terminal| {
         execute!(std::io::stdout(), EnableMouseCapture)?;
-        let result = app(terminal);
+        let result = app(terminal, args.gpu);
         execute!(std::io::stdout(), DisableMouseCapture)?;
         result
     })
