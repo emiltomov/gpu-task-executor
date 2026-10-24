@@ -23,10 +23,39 @@ enum Prompt {
     Open,
 }
 
+/// System clipboard with an in-process fallback when none is available.
+#[derive(Default)]
+struct Clip {
+    system: Option<arboard::Clipboard>,
+    local: String,
+}
+
+impl Clip {
+    fn system(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.system.is_none() {
+            self.system = arboard::Clipboard::new().ok();
+        }
+        self.system.as_mut()
+    }
+
+    fn set(&mut self, text: String) {
+        if let Some(c) = self.system() {
+            let _ = c.set_text(text.clone());
+        }
+        self.local = text;
+    }
+
+    fn get(&mut self) -> String {
+        self.system()
+            .and_then(|c| c.get_text().ok())
+            .unwrap_or_else(|| self.local.clone())
+    }
+}
+
 pub struct MatrixUi {
     defs: Editor,
     expr: Editor,
-    clipboard: String,
+    clipboard: Clip,
     /// File path prompt shown above the result while saving/opening.
     prompt: Option<(Prompt, Editor)>,
     status: Option<Result<String, String>>,
@@ -59,7 +88,7 @@ impl MatrixUi {
         Self {
             defs: Editor::new("A = [1 2; 3 4]\nB = [0 1; 1 0]"),
             expr: Editor::new("A * B + A'"),
-            clipboard: String::new(),
+            clipboard: Clip::default(),
             prompt: None,
             status: None,
             focus: Focus::Expr,
@@ -113,16 +142,16 @@ impl MatrixUi {
                     }
                     'c' => {
                         if let Some(t) = self.editor().selected_text() {
-                            self.clipboard = t;
+                            self.clipboard.set(t);
                         }
                     }
                     'x' => {
                         if let Some(t) = self.editor().cut() {
-                            self.clipboard = t;
+                            self.clipboard.set(t);
                         }
                     }
                     'v' => {
-                        let clip = self.clipboard.clone();
+                        let clip = self.clipboard.get();
                         self.editor().insert_str(&clip);
                     }
                     'a' => self.editor().select_all(),
@@ -276,5 +305,17 @@ impl MatrixUi {
             ),
             result,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_round_trips() {
+        let mut c = Clip::default();
+        c.set("A = [1 2]".into());
+        assert_eq!(c.get(), "A = [1 2]");
     }
 }
