@@ -1,0 +1,2 @@
+# Degree of every node (number of adjacent nodes).
+A * ones

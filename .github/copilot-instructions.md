@@ -15,7 +15,7 @@ Rust TUI app (`ratatui`) that runs compute workloads on the GPU via `wgpu` (WGSL
 - `gpu.rs`: `Gpu` (device, queue, adapter info) created once at startup and shared by all screens.
 - `mandelbrot.rs` + `mandelbrot.wgsl`: per-pixel iteration counts, cached by (width, height, view).
 - `automata.rs` + `automata.wgsl`: Game of Life and Lenia on ping-pong storage buffers; state stays on the GPU and is read back only for drawing. Both entry points share one bind-group layout, so `life` must reference the `kernel` binding.
-- `matrix.rs` + `matrix.wgsl` + `matrix_ui.rs`: matrix expressions (`Matrix`, tokenizer/parser, `Backend` trait implemented by `Gpu`; each operation is one GPU dispatch with readback, so composed expressions chain GPU ops). Tests compare against a CPU backend.
+- `matrix.rs` + `matrix.wgsl` + `matrix_ui.rs`: matrix expressions (`Matrix`, tokenizer/parser, `Backend` trait implemented by `Gpu`; each operation is one GPU dispatch with readback, so composed expressions chain GPU ops). Tests compare against a CPU backend. `examples/` files are embedded via `examples.rs` (new examples need an entry there).
 - `automata_ui.rs`: setup form and run screen. Grid size follows the terminal (Life: braille, 2x4 cells per character; Lenia: half blocks, 1x2); a resize restarts the simulation.
 - `gpu.rs` `Gpu::run` (vecadd/saxpy/square, uses `shader.wgsl`) is currently unused.
 

@@ -1,0 +1,2 @@
+# Move the light by rotating it 45 degrees around the y axis, then shade again.
+N * (roty(45) * L)

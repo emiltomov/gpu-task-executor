@@ -103,7 +103,7 @@ impl Matrix {
     }
 }
 
-fn fmt_num(v: f32) -> String {
+pub fn fmt_num(v: f32) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" || s.is_empty() {
@@ -130,7 +130,7 @@ fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Res
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if line.starts_with("output ") {
+        if line.starts_with("output ") || line.starts_with("graph ") {
             continue;
         }
         if let Some(path) = line.strip_prefix("include ") {
@@ -151,10 +151,45 @@ fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Res
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             bail!("line {}: bad name '{name}'", n + 1);
         }
-        let m = Matrix::parse(body).with_context(|| format!("line {}", n + 1))?;
+        let m = match body.trim().strip_prefix("image ") {
+            Some(spec) => load_image(spec.trim()),
+            None => Matrix::parse(body),
+        }
+        .with_context(|| format!("line {}", n + 1))?;
         vars.insert(name.to_string(), m);
     }
     Ok(())
+}
+
+const MAX_IMAGE_SIDE: u32 = 128;
+const EARTH_PNG: &[u8] = include_bytes!("../examples/lighting/earth.png");
+
+/// Loads a grayscale image (0..1) as a matrix; `builtin:earth` is a bundled NASA photo.
+fn load_image(spec: &str) -> Result<Matrix> {
+    let img = if spec == "builtin:earth" {
+        image::load_from_memory(EARTH_PNG)?
+    } else {
+        image::open(spec).with_context(|| format!("cannot read image '{spec}'"))?
+    };
+    let img = if img.width().max(img.height()) > MAX_IMAGE_SIDE {
+        img.thumbnail(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE)
+    } else {
+        img
+    };
+    let gray = img.to_luma8();
+    Ok(Matrix {
+        rows: gray.height() as usize,
+        cols: gray.width() as usize,
+        data: gray.pixels().map(|p| p.0[0] as f32 / 255.0).collect(),
+    })
+}
+
+/// Matrix name from the first `graph NAME` line of the definitions, if any.
+pub fn graph_name(defs: &str) -> Option<String> {
+    defs.lines()
+        .find_map(|l| l.trim().strip_prefix("graph "))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
 }
 
 /// Path from the first `output path` line of the definitions, if any.
@@ -184,6 +219,15 @@ pub fn save_result(path: &str, m: &Matrix) -> Result<()> {
 pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read '{path}'"))?;
     Ok(split_input(&text))
+}
+
+/// Joins the expression lines, skipping blank lines and `#` comments.
+pub fn clean_expression(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Separates the `# expr:` line from the definitions.
@@ -363,8 +407,32 @@ fn eval(e: &Expr, vars: &HashMap<String, Matrix>, be: &dyn Backend) -> Result<Ma
         }
         Expr::Neg(x) => be.binary(Op::Mul, &eval(x, vars, be)?, &Matrix::scalar(-1.0))?,
         Expr::T(x) => be.transpose(&eval(x, vars, be)?)?,
-        Expr::Bin(op, l, r) => be.binary(*op, &eval(l, vars, be)?, &eval(r, vars, be)?)?,
+        Expr::Bin(op, l, r) => {
+            let (a, b) = (eval(l, vars, be)?, eval(r, vars, be)?);
+            // A number added to or subtracted from a matrix applies to every element.
+            let (a, b) = match op {
+                Op::Add | Op::Sub if b.is_scalar() && !a.is_scalar() => {
+                    let f = Matrix::filled(a.rows, a.cols, b.data[0]);
+                    (a, f)
+                }
+                Op::Add | Op::Sub if a.is_scalar() && !b.is_scalar() => {
+                    (Matrix::filled(b.rows, b.cols, a.data[0]), b)
+                }
+                _ => (a, b),
+            };
+            be.binary(*op, &a, &b)?
+        }
     })
+}
+
+impl Matrix {
+    fn filled(rows: usize, cols: usize, v: f32) -> Matrix {
+        Matrix {
+            rows,
+            cols,
+            data: vec![v; rows * cols],
+        }
+    }
 }
 
 fn square(n: usize, f: impl Fn(usize, usize) -> f32) -> Matrix {
@@ -411,6 +479,34 @@ fn transformation(name: &str, a: &[f32]) -> Result<Matrix> {
                 bail!("identity() needs a size between 1 and 1024");
             }
             square(n as usize, |r, c| if r == c { 1.0 } else { 0.0 })
+        }
+        "ones" => {
+            argc(2)?;
+            let dim = |v: f32| -> Result<usize> {
+                if v.fract() != 0.0 || !(1.0..=1024.0).contains(&v) {
+                    bail!("ones() needs sizes between 1 and 1024");
+                }
+                Ok(v as usize)
+            };
+            Matrix::filled(dim(a[0])?, dim(a[1])?, 1.0)
+        }
+        // n x n blur kernel: each row averages a pixel with its neighbours (1 2 1) / 4.
+        "smooth" => {
+            argc(1)?;
+            let n = a[0];
+            if n.fract() != 0.0 || !(2.0..=1024.0).contains(&n) {
+                bail!("smooth() needs a size between 2 and 1024");
+            }
+            let n = n as usize;
+            square(n, |r, c| {
+                let edge = r == 0 || r == n - 1;
+                match r.abs_diff(c) {
+                    0 if edge => 0.75,
+                    0 => 0.5,
+                    1 => 0.25,
+                    _ => 0.0,
+                }
+            })
         }
         "scale" => {
             if a.is_empty() {
@@ -761,6 +857,65 @@ mod tests {
         assert!(evaluate(defs, "rot(P)", &Cpu).is_err());
         assert!(evaluate(defs, "nope(1)", &Cpu).is_err());
         assert!(evaluate(defs, "rot(30", &Cpu).is_err());
+    }
+
+    #[test]
+    fn graph_directive_and_scalar_broadcast() {
+        assert_eq!(graph_name("A = [1]\ngraph A\n"), Some("A".into()));
+        assert_eq!(graph_name("A = [1]"), None);
+        let r = evaluate("A = [1 2; 3 4]", "A - 1 + ones(2, 2)", &Cpu).unwrap();
+        assert_eq!(r.data, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn bundled_examples_evaluate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
+        let run = |input: &str, expr: &str| {
+            let (defs, _) = split_input(&read(input));
+            let expr: Vec<String> = read(expr)
+                .lines()
+                .filter(|l| !l.trim().starts_with('#') && !l.trim().is_empty())
+                .map(str::to_string)
+                .collect();
+            evaluate(&defs, &expr.join(" "), &Cpu).unwrap()
+        };
+        for (dir, input) in [
+            ("markov", "chain"),
+            ("graph", "graph"),
+            ("lighting", "scene"),
+        ] {
+            for entry in std::fs::read_dir(root.join(dir)).unwrap() {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                if name != format!("{input}.txt")
+                    && name.ends_with(".txt")
+                    && !name.starts_with("photo")
+                {
+                    run(&format!("{dir}/{input}.txt"), &format!("{dir}/{name}"));
+                }
+            }
+        }
+        let steady = run("markov/chain.txt", "markov/steady.txt");
+        assert!((steady.data[0] - 5.0 / 6.0).abs() < 1e-3);
+        assert_eq!(
+            run("graph/graph.txt", "graph/degrees.txt").data,
+            vec![2.0, 2.0, 3.0, 2.0, 1.0]
+        );
+        assert_eq!(
+            run("graph/graph.txt", "graph/neighbors.txt").data,
+            vec![1.0, 1.0, 0.0, 1.0, 0.0]
+        );
+        assert!(
+            run("graph/graph.txt", "graph/reach3.txt")
+                .data
+                .iter()
+                .all(|&v| v > 0.0)
+        );
+    }
+
+    #[test]
+    fn expression_skips_comments_and_joins_lines() {
+        assert_eq!(clean_expression("# note\nA *\n  B\n\n"), "A * B");
     }
 
     #[test]

@@ -1,0 +1,2 @@
+# Adjacent nodes of node 2: non-zero entries mark neighbours.
+A * e2

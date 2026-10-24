@@ -1,5 +1,6 @@
+use crate::examples::EXAMPLES as BUNDLED;
 use crate::gpu::{Gpu, list_adapters};
-use crate::matrix::{evaluate, result_text, save_result, split_input};
+use crate::matrix::{clean_expression, evaluate, result_text, save_result, split_input};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::io::Read;
@@ -24,7 +25,20 @@ so it can be piped into another run:
   gtu -i matrices.txt -e expression.txt -o result.txt
   gtu -i matrices.txt -e expression.txt | gtu -i - -e next.txt
   echo \"A * B\" | gtu -i matrices.txt -e -
-  cat matrices.txt | gtu -e expression.txt";
+  cat matrices.txt | gtu -e expression.txt
+
+Piping: every run prints 'result = [..]', which is itself a valid input file, so runs chain:
+  gtu -i a.txt -e step1.txt | gtu -i - -e step2.txt | gtu -i - -e step3.txt -o final.txt
+  (the result is named 'result'; refer to it as 'result' in the next expression)
+Only one of --input/--expression can read stdin. Errors go to stderr with exit code 1,
+so `gtu ... && next` and `set -o pipefail` work in scripts.
+
+Bundled algorithms (Markov chains, graph search, lighting/photo):
+  gtu --list-examples                 # number: title
+  gtu --example 2                     # run example 2 (number or part of the title)
+  gtu --example 2 --show-example      # print its input file, to edit and re-run via -i -
+  gtu --example 'steady' -o out.txt
+  gtu --example 3 | gtu -i - -e next.txt";
 
 /// GPU matrix calculator: run without options for the interactive UI.
 #[derive(Parser)]
@@ -46,6 +60,18 @@ pub struct Cli {
     #[arg(short, long, value_name = "INDEX")]
     pub gpu: Option<usize>,
 
+    /// Run a bundled algorithm example by number or part of its title
+    #[arg(long, value_name = "N|TITLE")]
+    example: Option<String>,
+
+    /// With --example: print the example as an input file instead of running it
+    #[arg(long, requires = "example")]
+    show_example: bool,
+
+    /// List the bundled algorithm examples and exit
+    #[arg(long)]
+    list_examples: bool,
+
     /// List the GPUs visible to gtu and exit
     #[arg(short, long)]
     list_gpus: bool,
@@ -53,7 +79,12 @@ pub struct Cli {
 
 impl Cli {
     pub fn is_batch(&self) -> bool {
-        self.input.is_some() || self.expression.is_some() || self.output.is_some() || self.list_gpus
+        self.input.is_some()
+            || self.expression.is_some()
+            || self.output.is_some()
+            || self.list_gpus
+            || self.example.is_some()
+            || self.list_examples
     }
 }
 
@@ -67,15 +98,6 @@ fn read(path: &str) -> Result<String> {
     } else {
         std::fs::read_to_string(path).with_context(|| format!("cannot read '{path}'"))
     }
-}
-
-/// Joins the expression lines, skipping blank lines and `#` comments.
-fn clean_expression(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub fn open_gpu(index: Option<usize>) -> Result<Gpu> {
@@ -96,10 +118,41 @@ fn list_gpus() {
     }
 }
 
+fn find_example(key: &str) -> Result<&'static crate::examples::Example> {
+    if let Ok(n) = key.parse::<usize>() {
+        return BUNDLED
+            .get(n.wrapping_sub(1))
+            .with_context(|| format!("no example {n}; see `gtu --list-examples`"));
+    }
+    let key = key.to_lowercase();
+    let mut hits = BUNDLED
+        .iter()
+        .filter(|e| e.title.to_lowercase().contains(&key));
+    match (hits.next(), hits.next()) {
+        (Some(e), None) => Ok(e),
+        (None, _) => bail!("no example matches '{key}'; see `gtu --list-examples`"),
+        _ => bail!("'{key}' matches several examples; use its number"),
+    }
+}
+
 pub fn run(cli: &Cli) -> Result<()> {
+    if cli.list_examples {
+        for (i, e) in BUNDLED.iter().enumerate() {
+            println!("{}: {}", i + 1, e.title);
+        }
+        return Ok(());
+    }
     if cli.list_gpus {
         list_gpus();
         return Ok(());
+    }
+    if let Some(key) = &cli.example {
+        let (defs, expr) = find_example(key)?.load();
+        if cli.show_example {
+            print!("{}\n# expr: {expr}\n", defs.trim_end());
+            return Ok(());
+        }
+        return finish(cli, &defs, &expr);
     }
     let input = cli.input.as_deref().unwrap_or("-");
     if input == "-" && cli.expression.as_deref() == Some("-") {
@@ -110,11 +163,15 @@ pub fn run(cli: &Cli) -> Result<()> {
         Some(p) => clean_expression(&read(p)?),
         None => default_expr.context("no expression: pass --expression or add a '# expr:' line")?,
     };
+    finish(cli, &defs, &expr)
+}
+
+fn finish(cli: &Cli, defs: &str, expr: &str) -> Result<()> {
     if expr.is_empty() {
         bail!("expression is empty");
     }
     let gpu = open_gpu(cli.gpu)?;
-    let result = evaluate(&defs, &expr, &gpu)?;
+    let result = evaluate(defs, expr, &gpu)?;
     match &cli.output {
         Some(path) => save_result(path, &result),
         None => {
@@ -129,17 +186,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expression_skips_comments_and_joins_lines() {
-        assert_eq!(clean_expression("# note\nA *\n  B\n\n"), "A * B");
-    }
-
-    #[test]
     fn gpu_option_parses_and_list_is_batch() {
         let cli = Cli::parse_from(["gtu", "-g", "2"]);
         assert_eq!(cli.gpu, Some(2));
         assert!(!cli.is_batch());
         assert!(Cli::parse_from(["gtu", "--list-gpus"]).is_batch());
         assert!(open_gpu(Some(9999)).is_err());
+    }
+
+    #[test]
+    fn examples_are_found_by_number_or_title() {
+        assert_eq!(find_example("1").unwrap().title, BUNDLED[0].title);
+        assert!(find_example("steady").is_ok());
+        assert!(find_example("0").is_err());
+        assert!(find_example("nonexistent").is_err());
+        assert!(Cli::parse_from(["gtu", "--list-examples"]).is_batch());
     }
 
     #[test]

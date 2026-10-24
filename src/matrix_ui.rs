@@ -1,13 +1,18 @@
 use crate::editor::Editor;
+use crate::examples::EXAMPLES;
 use crate::gpu::Gpu;
-use crate::matrix::{Matrix, evaluate, load_input, output_path, save_input, save_result};
+use crate::graph::{self, Graph};
+use crate::matrix::{
+    Matrix, evaluate, graph_name, load_input, output_path, parse_definitions, save_input,
+    save_result,
+};
 use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::Line,
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, List, ListState, Paragraph},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -59,6 +64,12 @@ pub struct MatrixUi {
     /// File path prompt shown above the result while saving/opening.
     prompt: Option<(Prompt, Editor)>,
     status: Option<Result<String, String>>,
+    /// Example picker, shown over the whole screen while open.
+    examples: Option<ListState>,
+    /// Graph drawn next to the result when the definitions contain `graph NAME`.
+    graph: Option<(String, Graph)>,
+    /// Input picture matching a large (image-sized) result, drawn next to it.
+    before: Option<Matrix>,
     focus: Focus,
     result: Option<Result<Matrix, String>>,
 }
@@ -83,6 +94,8 @@ pub const HELP: (&str, &[&str]) = (
         "Ctrl+C/X/V/A   copy / cut / paste / select all",
         "Ctrl+S         save input    Ctrl+O  open file",
         "Ctrl+R         save result once (asks for a path)",
+        "F2             load an example (also in the main menu)",
+        "graph NAME    (in definitions) draw matrix NAME as a 2D graph",
         "F1             this help",
         "Esc            back",
     ],
@@ -96,9 +109,19 @@ impl MatrixUi {
             clipboard: Clip::default(),
             prompt: None,
             status: None,
+            examples: None,
+            graph: None,
+            before: None,
             focus: Focus::Expr,
             result: None,
         }
+    }
+
+    /// Starts with the example picker open.
+    pub fn with_examples() -> Self {
+        let mut ui = Self::new();
+        ui.examples = Some(ListState::default().with_selected(Some(0)));
+        ui
     }
 
     fn editor(&mut self) -> &mut Editor {
@@ -122,10 +145,50 @@ impl MatrixUi {
                     .map_err(|e| format!("{e:#}")),
             );
         }
+        self.graph = None;
+        let defs = self.defs.text();
+        self.before = match (&self.result, parse_definitions(&defs)) {
+            (Some(Ok(r)), Ok(vars)) if is_picture(r) => vars
+                .get("I")
+                .filter(|m| (m.rows, m.cols) == (r.rows, r.cols))
+                .or_else(|| vars.values().find(|m| (m.rows, m.cols) == (r.rows, r.cols)))
+                .cloned(),
+            _ => None,
+        };
+        if let Some(name) = graph_name(&defs) {
+            let built = parse_definitions(&defs)
+                .ok()
+                .and_then(|vars| vars.get(&name).cloned())
+                .ok_or_else(|| format!("graph: unknown matrix '{name}'"))
+                .and_then(|m| Graph::from_matrix(&m).map_err(|e| format!("graph: {e:#}")));
+            match built {
+                Ok(g) => self.graph = Some((name, g)),
+                Err(e) => self.status = Some(Err(e)),
+            }
+        }
     }
 
     /// Returns `true` when the user wants to leave the screen.
     pub fn handle_key(&mut self, key: KeyEvent, gpu: &Gpu) -> bool {
+        if let Some(list) = &mut self.examples {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => list.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => list.select_next(),
+                KeyCode::Esc | KeyCode::Char('q') => self.examples = None,
+                KeyCode::Enter => {
+                    if let Some(ex) = list.selected().and_then(|i| EXAMPLES.get(i)) {
+                        let (defs, expr) = ex.load();
+                        self.defs = Editor::new(&defs);
+                        self.expr = Editor::new(&expr);
+                        self.focus = Focus::Expr;
+                        self.examples = None;
+                        self.calculate(gpu);
+                    }
+                }
+                _ => {}
+            }
+            return false;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let multiline = self.prompt.is_none() && self.focus == Focus::Defs;
@@ -189,6 +252,9 @@ impl MatrixUi {
                 }
             }
             KeyCode::F(5) => self.calculate(gpu),
+            KeyCode::F(2) if self.prompt.is_none() => {
+                self.examples = Some(ListState::default().with_selected(Some(0)));
+            }
             KeyCode::Enter if self.prompt.is_some() => {}
             KeyCode::Enter if !multiline => self.calculate(gpu),
             KeyCode::Enter => self.editor().insert_str("\n"),
@@ -227,7 +293,21 @@ impl MatrixUi {
         done.map_err(|e| format!("{e:#}"))
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        if let Some(state) = &mut self.examples {
+            let items: Vec<&str> = EXAMPLES.iter().map(|e| e.title).collect();
+            let list = List::new(items)
+                .block(
+                    Block::bordered()
+                        .title(" Matrix examples ")
+                        .title_bottom(" up/down: select  Enter: load and calculate  Esc: back "),
+                )
+                .highlight_symbol("> ")
+                .highlight_style(Style::new().add_modifier(ratatui::style::Modifier::REVERSED));
+            frame.render_widget(Clear, area);
+            frame.render_stateful_widget(list, area, state);
+            return;
+        }
         let [defs, expr, prompt, result] = Layout::vertical([
             Constraint::Length(self.defs.line_count() as u16 + 2),
             Constraint::Length(3),
@@ -302,20 +382,106 @@ impl MatrixUi {
             };
             lines.insert(0, Line::styled(msg.as_str(), Style::new().fg(color)));
         }
-        frame.render_widget(
-            Paragraph::new(lines).style(style).block(
-                Block::bordered()
-                    .title(" Result ")
-                    .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+O open  F1: help  Esc: back "),
-            ),
-            result,
-        );
+        let outer = Block::bordered().title(" Result ")
+            .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+O open  F2: examples  F1: help  Esc: back ");
+        let inner = outer.inner(result);
+        frame.render_widget(outer, result);
+        if let (Some(before), Some(Ok(after))) = (&self.before, &self.result) {
+            let [msg, pics] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+            if let Some(status) = &self.status {
+                let color = if status.is_ok() {
+                    Color::Cyan
+                } else {
+                    Color::Red
+                };
+                let text = status.as_ref().unwrap_or_else(|e| e);
+                frame.render_widget(
+                    Paragraph::new(text.as_str()).style(Style::new().fg(color)),
+                    msg,
+                );
+            }
+            let [l, r] = Layout::horizontal([Constraint::Percentage(50); 2]).areas(pics);
+            draw_picture(frame, l, " Before ", before);
+            draw_picture(frame, r, " After ", after);
+            return;
+        }
+        let (text_area, graph_area) = if self.graph.is_some() {
+            let [l, r] =
+                Layout::horizontal([Constraint::Percentage(40), Constraint::Min(10)]).areas(inner);
+            (l, Some(r))
+        } else {
+            (inner, None)
+        };
+        frame.render_widget(Paragraph::new(lines).style(style), text_area);
+        if let (Some(area), Some((name, g))) = (graph_area, &self.graph) {
+            let values = match &self.result {
+                Some(Ok(m)) if m.data.len() == g.n && (m.rows == 1 || m.cols == 1) => {
+                    Some(m.data.as_slice())
+                }
+                _ => None,
+            };
+            graph::draw(frame, area, &format!(" Graph {name} "), g, values);
+        }
+    }
+}
+
+/// Results this big are pictures rather than numbers worth reading.
+fn is_picture(m: &Matrix) -> bool {
+    m.rows >= 8 && m.cols >= 8
+}
+
+/// Grayscale picture (values clamped to 0..1) using half blocks: 1 column x 2 pixels per cell.
+fn draw_picture(frame: &mut Frame, area: Rect, title: &str, m: &Matrix) {
+    let block = Block::bordered().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    // Keep the aspect ratio (a character cell is about twice as tall as wide).
+    let scale = (inner.width as f32 / m.cols as f32).min(inner.height as f32 * 2.0 / m.rows as f32);
+    let (w, h) = (
+        ((m.cols as f32 * scale) as u16).max(1),
+        (((m.rows as f32 * scale) / 2.0) as u16).max(1),
+    );
+    let gray = |px: u16, py: u16| {
+        let x = (px as usize * m.cols / w as usize).min(m.cols - 1);
+        let y = (py as usize * m.rows / (h as usize * 2)).min(m.rows - 1);
+        let v = (m.data[y * m.cols + x].clamp(0.0, 1.0) * 255.0) as u8;
+        Color::Rgb(v, v, v)
+    };
+    let buf = frame.buffer_mut();
+    for cy in 0..h {
+        for cx in 0..w {
+            if let Some(cell) = buf.cell_mut((inner.x + cx, inner.y + cy)) {
+                cell.set_symbol("▀")
+                    .set_fg(gray(cx, cy * 2))
+                    .set_bg(gray(cx, cy * 2 + 1));
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photo_example_shows_before_and_after() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        let (defs, expr) = EXAMPLES
+            .iter()
+            .find(|e| e.title == "Photo: enhance contrast/brightness")
+            .unwrap()
+            .load();
+        ui.defs = Editor::new(&defs);
+        ui.expr = Editor::new(&expr);
+        ui.calculate(&gpu);
+        let before = ui.before.expect("before picture");
+        assert_eq!((before.rows, before.cols), (96, 96));
+    }
 
     #[test]
     fn clipboard_round_trips() {

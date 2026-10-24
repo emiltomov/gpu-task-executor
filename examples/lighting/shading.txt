@@ -1,0 +1,2 @@
+# Lambert shading: brightness of each facet is normal . light (negative = faces away).
+N * L

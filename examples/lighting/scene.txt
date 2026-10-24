@@ -1,0 +1,12 @@
+# Lighting toy scene.
+# N: unit normals (x y z) of four surface facets, one per row.
+N = [0 0 1; 0.7071 0 0.7071; 1 0 0; 0 1 0]
+# L: direction towards the light.
+L = [0; 0; 1]
+# I: 3x3 grayscale image (0..1); J: all ones; B: smoothing matrix (blur).
+I = [0.1 0.3 0.2; 0.4 0.7 0.5; 0.2 0.5 0.3]
+J = [1 1 1; 1 1 1; 1 1 1]
+B = [0.5 0.5 0; 0.25 0.5 0.25; 0 0.5 0.5]
+# D: three ray directions (columns) cast from the camera.
+D = [0 0.5 -0.5; 0 0 0; 1 0.866 0.866]
+# expr: N * L

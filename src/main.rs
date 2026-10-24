@@ -2,9 +2,11 @@ mod automata;
 mod automata_ui;
 mod cli;
 mod editor;
+mod examples;
 #[allow(dead_code)]
 mod gpu;
 mod gpuinfo;
+mod graph;
 mod mandelbrot;
 mod matrix;
 mod matrix_ui;
@@ -34,11 +36,12 @@ use ratatui::{
     widgets::{Block, Clear, List, ListState, Paragraph},
 };
 
-const MENU: [&str; 6] = [
+const MENU: [&str; 7] = [
     "Mandelbrot",
     "Game of Life",
     "Lenia",
     "Matrices",
+    "Matrix examples",
     "Select GPU",
     "Exit",
 ];
@@ -425,7 +428,11 @@ fn app(terminal: &mut DefaultTerminal, gpu_index: Option<usize>) -> Result<()> {
                         error = None;
                         screen = Screen::Matrix(MatrixUi::new());
                     }
-                    Some(4) => {
+                    Some(4) if renderer.is_some() => {
+                        error = None;
+                        screen = Screen::Matrix(MatrixUi::with_examples());
+                    }
+                    Some(5) => {
                         let infos = gpu::list_adapters();
                         let current = renderer.as_ref().and_then(|r| {
                             infos.iter().position(|i| {
@@ -436,7 +443,7 @@ fn app(terminal: &mut DefaultTerminal, gpu_index: Option<usize>) -> Result<()> {
                         let state = ListState::default().with_selected(current.or(Some(0)));
                         screen = Screen::Gpus(infos, state);
                     }
-                    Some(5) => return Ok(()),
+                    Some(6) => return Ok(()),
                     _ => {}
                 },
                 _ => {}

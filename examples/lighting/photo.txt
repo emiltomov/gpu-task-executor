@@ -1,0 +1,4 @@
+# Real photo (NASA, Apollo 17 "Blue Marble", public domain) as a grayscale matrix, 96x96.
+# Use any PNG/JPEG instead with:  I = image path/to/file.png   (scaled to at most 128 px)
+I = image builtin:earth
+# expr: 1.6 * I - 0.25

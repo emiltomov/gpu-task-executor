@@ -1,0 +1,2 @@
+# Number of walks of length 3 between every pair of nodes.
+A * A * A

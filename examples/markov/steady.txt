@@ -1,0 +1,2 @@
+# Distribution after 16 steps: converges to the steady state [5/6 1/6].
+s * P*P*P*P*P*P*P*P*P*P*P*P*P*P*P*P
