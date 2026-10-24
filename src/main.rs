@@ -1,5 +1,6 @@
 mod automata;
 mod automata_ui;
+mod cli;
 mod editor;
 #[allow(dead_code)]
 mod gpu;
@@ -11,6 +12,7 @@ mod matrix_ui;
 use anyhow::Result;
 use automata::Kind;
 use automata_ui::{Run, Setup, SetupAction};
+use clap::Parser;
 use gpu::Gpu;
 use gpuinfo::{Monitor, Telemetry};
 use mandelbrot::{Mandelbrot, View};
@@ -493,6 +495,14 @@ fn app(terminal: &mut DefaultTerminal) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let args = cli::Cli::parse();
+    if args.is_batch() {
+        if let Err(e) = cli::run(&args) {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     ratatui::run(|terminal| {
         execute!(std::io::stdout(), EnableMouseCapture)?;
         let result = app(terminal);

@@ -171,15 +171,23 @@ pub fn save_input(path: &str, defs: &str, expr: &str) -> Result<()> {
     std::fs::write(path, text).with_context(|| format!("cannot write '{path}'"))
 }
 
+pub fn result_text(m: &Matrix) -> String {
+    format!("result = {}\n", m.to_literal())
+}
+
 /// Saves a result as `result = [..]`, so the file can be opened or included later.
 pub fn save_result(path: &str, m: &Matrix) -> Result<()> {
-    std::fs::write(path, format!("result = {}\n", m.to_literal()))
-        .with_context(|| format!("cannot write '{path}'"))
+    std::fs::write(path, result_text(m)).with_context(|| format!("cannot write '{path}'"))
 }
 
 /// Returns `(definitions, expression)` from a file written by [`save_input`] (or any definitions file).
 pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read '{path}'"))?;
+    Ok(split_input(&text))
+}
+
+/// Separates the `# expr:` line from the definitions.
+pub fn split_input(text: &str) -> (String, Option<String>) {
     let mut expr = None;
     let mut defs = Vec::new();
     for line in text.lines() {
@@ -188,7 +196,7 @@ pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
             None => defs.push(line),
         }
     }
-    Ok((defs.join("\n").trim_end().to_string(), expr))
+    (defs.join("\n").trim_end().to_string(), expr)
 }
 
 #[derive(Debug, Clone, PartialEq)]

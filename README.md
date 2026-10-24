@@ -56,6 +56,20 @@ Keys (`F1` opens a help window on every screen):
 | Matrices | `Tab` switch field, arrows/Home/End move (Shift selects), `Ctrl+C`/`X`/`V`/`A` copy/cut/paste (system clipboard, falling back to an internal one)/select all, `Enter` (in expression) or `F5` calculate, `Ctrl+S` save input, `Ctrl+R` save result (as `result = [...]`), or put a line `output path` in the definitions to save the result there on every calculation, `Ctrl+O` open file, `Esc` back. A definitions line `include path` loads the matrices of another file; saved files keep the expression in a `# expr:` comment |
 | Game of Life | left click spawns the selected pattern, `s` spawns it under the mouse pointer (random spot if outside the grid), `p` cycles patterns, `space` pause, `n` step, `+`/`-` speed, `r` restart |
 
+## Command line (no UI)
+
+The binary is `gtu`. Giving `--input`, `--expression` or `--output` evaluates a matrix expression on the GPU and exits; with no options the interactive UI starts. `gtu -h` shows the help.
+
+```sh
+gtu -i matrices.txt -e expression.txt -o result.txt   # write the result to a file
+gtu -i matrices.txt -e expression.txt                 # print "result = [..]" to stdout
+gtu -i matrices.txt -e expression.txt | gtu -i - -e next.txt   # pipe: use `result` in next.txt
+echo "A * B" | gtu -i matrices.txt -e -               # expression from stdin
+cat matrices.txt | gtu -e expression.txt              # definitions from stdin
+```
+
+If `--expression` is omitted, the `# expr:` line of the input file is used. Errors go to stderr with exit code 1.
+
 ## Tests
 
 ```sh
