@@ -229,7 +229,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>> {
                 i += 1;
             }
             toks.push(Tok::Id(chars[start..i].iter().collect()));
-        } else if "+-*()'".contains(c) {
+        } else if "+-*(),'".contains(c) {
             toks.push(Tok::Sym(c));
             i += 1;
         } else {
@@ -243,6 +243,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>> {
 enum Expr {
     Num(f32),
     Var(String),
+    Call(String, Vec<Expr>),
     Neg(Box<Expr>),
     T(Box<Expr>),
     Bin(Op, Box<Expr>, Box<Expr>),
@@ -305,6 +306,21 @@ impl Parser {
         self.pos += 1;
         match t {
             Some(Tok::Num(n)) => Ok(Expr::Num(n)),
+            Some(Tok::Id(n)) if self.eat('(') => {
+                let mut args = Vec::new();
+                if !self.eat(')') {
+                    loop {
+                        args.push(self.expr()?);
+                        if self.eat(')') {
+                            break;
+                        }
+                        if !self.eat(',') {
+                            bail!("expected ',' or ')' in call to '{n}'");
+                        }
+                    }
+                }
+                Ok(Expr::Call(n, args))
+            }
             Some(Tok::Id(n)) => Ok(Expr::Var(n)),
             Some(Tok::Sym('(')) => {
                 let e = self.expr()?;
@@ -332,10 +348,114 @@ fn eval(e: &Expr, vars: &HashMap<String, Matrix>, be: &dyn Backend) -> Result<Ma
             .get(n)
             .with_context(|| format!("unknown matrix '{n}'"))?
             .clone(),
+        Expr::Call(name, args) => {
+            let values = args
+                .iter()
+                .map(|a| {
+                    let m = eval(a, vars, be)?;
+                    if m.rows != 1 || m.cols != 1 {
+                        bail!("arguments of {name}() must be numbers");
+                    }
+                    Ok(m.data[0])
+                })
+                .collect::<Result<Vec<_>>>()?;
+            transformation(name, &values)?
+        }
         Expr::Neg(x) => be.binary(Op::Mul, &eval(x, vars, be)?, &Matrix::scalar(-1.0))?,
         Expr::T(x) => be.transpose(&eval(x, vars, be)?)?,
         Expr::Bin(op, l, r) => be.binary(*op, &eval(l, vars, be)?, &eval(r, vars, be)?)?,
     })
+}
+
+fn square(n: usize, f: impl Fn(usize, usize) -> f32) -> Matrix {
+    let data = (0..n * n).map(|i| f(i / n, i % n)).collect();
+    Matrix {
+        rows: n,
+        cols: n,
+        data,
+    }
+}
+
+fn matrix_of(rows: &[&[f32]]) -> Matrix {
+    Matrix {
+        rows: rows.len(),
+        cols: rows[0].len(),
+        data: rows.iter().flat_map(|r| r.iter().copied()).collect(),
+    }
+}
+
+fn clean(v: f32) -> f32 {
+    if v.abs() < 1e-6 { 0.0 } else { v }
+}
+
+fn sin_cos_deg(deg: f32) -> (f32, f32) {
+    let (s, c) = deg.to_radians().sin_cos();
+    (clean(s), clean(c))
+}
+
+/// Builds a linear transformation matrix; angles are in degrees and
+/// transformations apply to column vectors (`rot(90) * v`).
+fn transformation(name: &str, a: &[f32]) -> Result<Matrix> {
+    let argc = |n: usize| -> Result<()> {
+        if a.len() != n {
+            bail!("{name}() takes {n} argument(s), got {}", a.len());
+        }
+        Ok(())
+    };
+    let (sin, cos) = sin_cos_deg(a.first().copied().unwrap_or(0.0));
+    let m = match name {
+        "identity" => {
+            argc(1)?;
+            let n = a[0];
+            if n.fract() != 0.0 || !(1.0..=1024.0).contains(&n) {
+                bail!("identity() needs a size between 1 and 1024");
+            }
+            square(n as usize, |r, c| if r == c { 1.0 } else { 0.0 })
+        }
+        "scale" => {
+            if a.is_empty() {
+                bail!("scale() needs at least one factor");
+            }
+            square(a.len(), |r, c| if r == c { a[r] } else { 0.0 })
+        }
+        "rot" => {
+            argc(1)?;
+            matrix_of(&[&[cos, -sin], &[sin, cos]])
+        }
+        "rotx" => {
+            argc(1)?;
+            matrix_of(&[&[1.0, 0.0, 0.0], &[0.0, cos, -sin], &[0.0, sin, cos]])
+        }
+        "roty" => {
+            argc(1)?;
+            matrix_of(&[&[cos, 0.0, sin], &[0.0, 1.0, 0.0], &[-sin, 0.0, cos]])
+        }
+        "rotz" => {
+            argc(1)?;
+            matrix_of(&[&[cos, -sin, 0.0], &[sin, cos, 0.0], &[0.0, 0.0, 1.0]])
+        }
+        "shearx" => {
+            argc(1)?;
+            matrix_of(&[&[1.0, a[0]], &[0.0, 1.0]])
+        }
+        "sheary" => {
+            argc(1)?;
+            matrix_of(&[&[1.0, 0.0], &[a[0], 1.0]])
+        }
+        // Mirror across the line through the origin at the given angle.
+        "reflect" => {
+            argc(1)?;
+            let (s2, c2) = sin_cos_deg(2.0 * a[0]);
+            matrix_of(&[&[c2, s2], &[s2, -c2]])
+        }
+        // Orthogonal projection onto the line through the origin at the given angle.
+        "proj" => {
+            argc(1)?;
+            matrix_of(&[&[cos * cos, cos * sin], &[cos * sin, sin * sin]])
+        }
+        _ => bail!("unknown function '{name}'"),
+    };
+    Ok(m)
 }
 
 /// Evaluates e.g. `(A + B) * C'` against the definitions, composing operations.
@@ -596,6 +716,51 @@ mod tests {
         assert!(evaluate("output r.txt\nA = [1]", "A", &Cpu).is_ok());
         assert!(evaluate("include /nonexistent/x.txt", "1", &Cpu).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn linear_transformations() {
+        let defs = "v = [1; 0]\nP = [1 2; 3 4]";
+        let near = |m: Matrix, want: &[f32]| {
+            assert_eq!(m.data.len(), want.len());
+            assert!(
+                m.data.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5),
+                "{m:?}"
+            );
+        };
+        near(evaluate(defs, "rot(90) * v", &Cpu).unwrap(), &[0.0, 1.0]);
+        near(
+            evaluate(defs, "scale(2, 3) * P", &Cpu).unwrap(),
+            &[2.0, 4.0, 9.0, 12.0],
+        );
+        near(
+            evaluate(defs, "shearx(2) * P", &Cpu).unwrap(),
+            &[7.0, 10.0, 3.0, 4.0],
+        );
+        near(
+            evaluate(defs, "reflect(0) * P", &Cpu).unwrap(),
+            &[1.0, 2.0, -3.0, -4.0],
+        );
+        near(
+            evaluate(defs, "proj(0) * P", &Cpu).unwrap(),
+            &[1.0, 2.0, 0.0, 0.0],
+        );
+        near(
+            evaluate(defs, "rot(30) * rot(60) - rot(90)", &Cpu).unwrap(),
+            &[0.0; 4],
+        );
+        near(
+            evaluate(defs, "rotz(90) * scale(1, 2, 3)", &Cpu).unwrap(),
+            &[0.0, -2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0],
+        );
+        near(
+            evaluate(defs, "identity(2) * P", &Cpu).unwrap(),
+            &[1.0, 2.0, 3.0, 4.0],
+        );
+        assert!(evaluate(defs, "rot(1, 2)", &Cpu).is_err());
+        assert!(evaluate(defs, "rot(P)", &Cpu).is_err());
+        assert!(evaluate(defs, "nope(1)", &Cpu).is_err());
+        assert!(evaluate(defs, "rot(30", &Cpu).is_err());
     }
 
     #[test]

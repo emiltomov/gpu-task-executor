@@ -7,7 +7,7 @@ A Rust terminal UI (`ratatui`) that runs compute workloads on the GPU via `wgpu`
 - **Mandelbrot** – per-pixel iteration counts computed on the GPU; pan and zoom.
 - **Game of Life** – rendered with braille characters (2x4 cells per character).
 - **Lenia** – continuous cellular automaton rendered with half blocks (1x2).
-- **Matrices** – define matrices (`A = [1 2; 3 4]`) and compose operations in one expression, e.g. `(A + B) * C' - 2 * A`. Supports `+ - *` (matrix product; a number scales), `'` transpose, unary `-`, parentheses. Each step runs on the GPU.
+- **Matrices** – define matrices (`A = [1 2; 3 4]`) and compose operations in one expression, e.g. `(A + B) * C' - 2 * A`. Supports `+ - *` (matrix product; a number scales), `'` transpose, unary `-`, parentheses, and linear transformations as functions (angles in degrees, applied to column vectors): `rot(a)`, `rotx/roty/rotz(a)`, `scale(sx, sy[, sz])`, `shearx(k)`, `sheary(k)`, `identity(n)`, `reflect(a)` (mirror across the line at angle `a`), `proj(a)` (projection onto it), e.g. `rot(90) * v`. Each step runs on the GPU.
 - GPU info header on every screen, with NVML telemetry (sampled at most once per second; shows "unavailable" if NVML is missing).
 
 Automata state stays on the GPU (ping-pong storage buffers) and is read back only for drawing. Grid size follows the terminal; resizing restarts the simulation.

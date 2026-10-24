@@ -14,6 +14,8 @@ Input file (definitions), one per line:
   # expr: A * B + A'         optional default expression
 
 Expression file: + - * ( ) ' (transpose); a number scales, e.g. (A + B) * C' - 2 * A
+Linear transformations (degrees, applied to column vectors): rot(a) rotx(a) roty(a) rotz(a)
+  scale(sx, sy[, sz]) shearx(k) sheary(k) identity(n) reflect(a) proj(a), e.g. rot(90) * v
 Use '-' for stdin. The result is printed as 'result = [..]' (or written to --output),
 so it can be piped into another run:
 
