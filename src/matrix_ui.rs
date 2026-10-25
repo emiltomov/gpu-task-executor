@@ -21,11 +21,31 @@ enum Focus {
     Expr,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ExportKind {
+    Maze,
+    Image,
+    Raycast,
+}
+
+impl ExportKind {
+    fn default_name(self) -> &'static str {
+        match self {
+            ExportKind::Maze => "maze.zip",
+            ExportKind::Image => "image.png",
+            ExportKind::Raycast => "raycast.png",
+        }
+    }
+}
+
+const EXPORT_UNAVAILABLE: &str =
+    "Ctrl+E exports only maze (graph ... grid), image and raycast examples";
+
 #[derive(Clone, Copy, PartialEq)]
 enum Prompt {
     Save,
     SaveResult,
-    ExportMaze,
+    Export(ExportKind),
     Open,
 }
 
@@ -132,7 +152,8 @@ pub const HELP: (&str, &[&str]) = (
         "Ctrl+C/X/V/A   copy / cut / paste / select all",
         "Ctrl+S         save input    Ctrl+O  open file",
         "Ctrl+R         save result once (asks for a path)",
-        "Ctrl+E         export a `graph NAME grid W` maze + A*/BFS solutions as zip",
+        "Ctrl+E         export a `graph NAME grid W` maze + A*/BFS solutions as zip;",
+        "               image and raycast results as PNG (only in those cases)",
         "F2             load an example (also in the main menu)",
         "graph NAME [grid W]  (in definitions) draw matrix NAME as a graph (grid: node i at column i % W)",
         "M = maze W H [seed]  random maze; W, H, seed: numbers or variables (W = 21)",
@@ -330,7 +351,13 @@ impl MatrixUi {
                         let (kind, name) = match c.to_ascii_lowercase() {
                             's' => (Prompt::Save, "matrices.txt"),
                             'o' => (Prompt::Open, "matrices.txt"),
-                            'e' => (Prompt::ExportMaze, "maze.zip"),
+                            'e' => match self.export_kind() {
+                                Some(k) => (Prompt::Export(k), k.default_name()),
+                                None => {
+                                    self.status = Some(Err(EXPORT_UNAVAILABLE.into()));
+                                    return false;
+                                }
+                            },
                             _ => (Prompt::SaveResult, "result.txt"),
                         };
                         if kind != Prompt::SaveResult || matches!(self.result, Some(Ok(_))) {
@@ -414,7 +441,7 @@ impl MatrixUi {
                 Some(Ok(m)) => save_result(path, m).map(|_| format!("Result saved to {path}")),
                 _ => return Err("Nothing to save: calculate a result first".into()),
             },
-            Prompt::ExportMaze => self.export_maze(path),
+            Prompt::Export(kind) => self.export(kind, path),
             Prompt::Open => load_input(path).map(|(defs, expr)| {
                 self.defs = Editor::new(&defs);
                 if let Some(e) = expr {
@@ -426,6 +453,34 @@ impl MatrixUi {
             }),
         };
         done.map_err(|e| format!("{e:#}"))
+    }
+
+    /// What Ctrl+E can export for the current definitions/result, if anything.
+    fn export_kind(&self) -> Option<ExportKind> {
+        if matches!(graph_spec(&self.defs.text()), Some((_, Some(_)))) {
+            Some(ExportKind::Maze)
+        } else if self.before.is_some() {
+            Some(ExportKind::Image)
+        } else if matches!(self.result, Some(Ok(_)))
+            && is_raycast(&self.defs.text(), &self.expr.text())
+        {
+            Some(ExportKind::Raycast)
+        } else {
+            None
+        }
+    }
+
+    fn export(&self, kind: ExportKind, path: &str) -> anyhow::Result<String> {
+        match kind {
+            ExportKind::Maze => self.export_maze(path),
+            ExportKind::Image | ExportKind::Raycast => match &self.result {
+                Some(Ok(m)) => {
+                    crate::matrix::save_png(path, m)?;
+                    Ok(format!("Image saved to {path}"))
+                }
+                _ => anyhow::bail!("Nothing to export: calculate a result first"),
+            },
+        }
     }
 
     /// Zips the grid graph (`graph NAME grid W`) as a maze with A*/BFS solutions and the inputs.
@@ -497,7 +552,10 @@ impl MatrixUi {
             let title = match kind {
                 Prompt::Save => " Save to file (Enter: save, Esc: cancel) ",
                 Prompt::SaveResult => " Save result to file (Enter: save, Esc: cancel) ",
-                Prompt::ExportMaze => " Export maze + solutions as zip (Enter: save, Esc: cancel) ",
+                Prompt::Export(ExportKind::Maze) => {
+                    " Export maze + solutions as zip (Enter: save, Esc: cancel) "
+                }
+                Prompt::Export(_) => " Export result as PNG image (Enter: save, Esc: cancel) ",
                 Prompt::Open => " Open file (Enter: load, Esc: cancel) ",
             };
             frame.render_widget(
@@ -579,17 +637,27 @@ impl MatrixUi {
             Some(name) => format!(" Result: {name}{mode} "),
             None => format!(" Result{mode} "),
         };
-        let hints: &[&str] = if self.graph_focus {
-            &[
-                " arrows: pan  +/- PgUp/PgDn: zoom  0/Home: reset  F6/L: legend  F4/Esc: back ",
-                " arrows pan  +/- zoom  0 reset  F6 legend  Esc back ",
-                " arrows +/- 0 F6 Esc ",
+        let hints: Vec<String> = if self.graph_focus {
+            vec![
+                " arrows: pan  +/- PgUp/PgDn: zoom  0/Home: reset  F6/L: legend  F4/Esc: back "
+                    .into(),
+                " arrows pan  +/- zoom  0 reset  F6 legend  Esc back ".into(),
+                " arrows +/- 0 F6 Esc ".into(),
             ]
         } else {
-            &[
-                " Tab: switch  Enter: calc  Ctrl+S save  Ctrl+R result  Ctrl+E maze zip  Ctrl+O open  F2: examples  F3: operations list  F4: graph  F6: legend  F1: help  Esc: back ",
-                " Tab  Enter: calc  ^S save  ^R result  ^E zip  ^O open  F1: all keys  Esc ",
-                " Enter: calc  F1: all keys  Esc ",
+            let (long, short) = match self.export_kind() {
+                Some(ExportKind::Maze) => ("  Ctrl+E maze zip", " ^E zip"),
+                Some(_) => ("  Ctrl+E export PNG", " ^E png"),
+                None => ("", ""),
+            };
+            vec![
+                format!(
+                    " Tab: switch  Enter: calc  Ctrl+S save  Ctrl+R result{long}  Ctrl+O open  F2: examples  F3: operations list  F4: graph  F6: legend  F1: help  Esc: back "
+                ),
+                format!(
+                    " Tab  Enter: calc  ^S save  ^R result{short}  ^O open  F1: all keys  Esc "
+                ),
+                " Enter: calc  F1: all keys  Esc ".into(),
             ]
         };
         let room = result.width.saturating_sub(2) as usize;
@@ -597,7 +665,7 @@ impl MatrixUi {
             .iter()
             .find(|h| h.chars().count() <= room)
             .unwrap_or(&hints[hints.len() - 1]);
-        let outer = Block::bordered().title(title).title_bottom(*hint);
+        let outer = Block::bordered().title(title).title_bottom(hint.as_str());
         let inner = outer.inner(result);
         frame.render_widget(outer, result);
         if let (Some(before), Some(Ok(after))) = (&self.before, &self.result) {
@@ -762,6 +830,15 @@ fn scroll_offset(offset: usize, cursor: usize, visible: usize, total: usize) -> 
 }
 
 /// Results this big are pictures rather than numbers worth reading.
+/// A raycast rotates the camera and multiplies it with the ray directions `D`.
+fn is_raycast(defs: &str, expr: &str) -> bool {
+    ["rotx(", "roty(", "rotz("].iter().any(|r| expr.contains(r))
+        && expr
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == "D")
+        && defs.lines().any(|l| l.trim_start().starts_with("D ="))
+}
+
 fn is_picture(m: &Matrix) -> bool {
     m.rows >= 8 && m.cols >= 8
 }
@@ -801,6 +878,31 @@ fn draw_picture(frame: &mut Frame, area: Rect, title: &str, m: &Matrix) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_kind_follows_example() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        let mut kind = |title: &str| {
+            let (defs, expr) = EXAMPLES.iter().find(|e| e.title == title).unwrap().load();
+            ui.defs = Editor::new(&defs);
+            ui.expr = Editor::new(&expr);
+            ui.calculate(&gpu);
+            ui.export_kind()
+        };
+        assert_eq!(
+            kind("Maze: A* path through 504 cells"),
+            Some(ExportKind::Maze)
+        );
+        assert_eq!(kind("Photo: blur"), Some(ExportKind::Image));
+        assert_eq!(kind("Graph: node degrees"), None);
+        assert_eq!(kind("Lighting: Lambert shading"), None);
+        assert_eq!(
+            kind("Lighting: raycast facets vs. rays"),
+            Some(ExportKind::Raycast)
+        );
+        assert_eq!(kind("Lighting: moved light"), None);
+    }
 
     #[test]
     fn photo_example_shows_before_and_after() {

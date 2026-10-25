@@ -251,18 +251,33 @@ pub fn save_input(path: &str, defs: &str, expr: &str) -> Result<()> {
     std::fs::write(expand_tilde(path), text).with_context(|| format!("cannot write '{path}'"))
 }
 
+/// Saves a matrix as a grayscale PNG (values clamped to 0..1); small matrices are enlarged so
+/// every cell is visible.
+pub fn save_png(path: &str, m: &Matrix) -> Result<()> {
+    let scale = (256 / m.rows.max(m.cols).max(1)).max(1);
+    let (w, h) = (m.cols * scale, m.rows * scale);
+    let img = image::GrayImage::from_fn(w as u32, h as u32, |x, y| {
+        let v = m.data[(y as usize / scale) * m.cols + x as usize / scale];
+        image::Luma([(v.clamp(0.0, 1.0) * 255.0).round() as u8])
+    });
+    img.save_with_format(expand_tilde(path), image::ImageFormat::Png)
+        .with_context(|| format!("cannot write '{path}'"))
+}
+
 pub fn result_text(m: &Matrix) -> String {
     format!("result = {}\n", m.to_literal())
 }
 
 /// Saves a result as `result = [..]`, so the file can be opened or included later.
 pub fn save_result(path: &str, m: &Matrix) -> Result<()> {
-    std::fs::write(expand_tilde(path), result_text(m)).with_context(|| format!("cannot write '{path}'"))
+    std::fs::write(expand_tilde(path), result_text(m))
+        .with_context(|| format!("cannot write '{path}'"))
 }
 
 /// Returns `(definitions, expression)` from a file written by [`save_input`] (or any definitions file).
 pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
-    let text = std::fs::read_to_string(expand_tilde(path)).with_context(|| format!("cannot read '{path}'"))?;
+    let text = std::fs::read_to_string(expand_tilde(path))
+        .with_context(|| format!("cannot read '{path}'"))?;
     Ok(split_input(&text))
 }
 
@@ -834,6 +849,23 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn png_export_scales_small_matrices() {
+        let m = Matrix {
+            rows: 2,
+            cols: 4,
+            data: vec![0.0, 1.0, 0.5, 2.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let p = std::env::temp_dir().join(format!("gtu-{}.png", std::process::id()));
+        super::save_png(p.to_str().unwrap(), &m).unwrap();
+        let img = image::open(&p).unwrap().to_luma8();
+        std::fs::remove_file(&p).ok();
+        assert_eq!(img.dimensions(), (256, 128));
+        assert_eq!(img.get_pixel(0, 0).0[0], 0);
+        assert_eq!(img.get_pixel(64, 0).0[0], 255);
+        assert_eq!(img.get_pixel(255, 0).0[0], 255);
+    }
+
     use super::expand_tilde;
 
     #[test]
