@@ -308,6 +308,31 @@ mod tests {
     }
 
     #[test]
+    fn open_reads_zip_and_image_files() {
+        let m = maze(4, 4, 1).unwrap();
+        let dir = std::env::temp_dir();
+        let zip = dir.join(format!("gtu-open-{}.zip", std::process::id()));
+        let input = "graph M grid 4\nM = maze 4 4 1\n# expr: M * M\n";
+        save_maze_bundle(zip.to_str().unwrap(), &m, 4, input, None).unwrap();
+        let (defs, expr) = crate::matrix::load_input(zip.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&zip).unwrap();
+        assert!(defs.contains("M = maze 4 4 1"));
+        assert_eq!(expr.as_deref(), Some("M * M"));
+
+        let png = dir.join(format!("gtu-open-{}.png", std::process::id()));
+        let img = crate::matrix::Matrix {
+            rows: 2,
+            cols: 2,
+            data: vec![0.0, 0.5, 0.5, 1.0],
+        };
+        crate::matrix::save_png(png.to_str().unwrap(), &img).unwrap();
+        let (defs, expr) = crate::matrix::load_input(png.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&png).unwrap();
+        assert!(defs.starts_with("I = image ") && expr.is_none());
+        assert!(crate::matrix::load_input("nope.png").is_err());
+    }
+
+    #[test]
     fn astar_prefers_cheaper_weighted_route() {
         // 0 -> 2 directly costs 5, via 1 costs 1 + 1.
         let m = Matrix::parse("[0 1 5; 0 0 1; 0 0 0]").unwrap();

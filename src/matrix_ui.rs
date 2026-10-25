@@ -3,7 +3,7 @@ use crate::examples::EXAMPLES;
 use crate::gpu::Gpu;
 use crate::graph::{self, Graph, View};
 use crate::matrix::{
-    Matrix, evaluate, graph_spec, load_input, output_path, parse_definitions, save_input,
+    Matrix, evaluate_vars, graph_spec, load_input, output_path, parse_definitions, save_input,
     save_result, size_value,
 };
 use ratatui::{
@@ -19,13 +19,13 @@ use ratatui::{
 enum Focus {
     Defs,
     Expr,
+    Back,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ExportKind {
     Maze,
     Image,
-    Raycast,
 }
 
 impl ExportKind {
@@ -33,10 +33,12 @@ impl ExportKind {
         match self {
             ExportKind::Maze => "maze.zip",
             ExportKind::Image => "image.png",
-            ExportKind::Raycast => "raycast.png",
         }
     }
 }
+
+const FEED_UNAVAILABLE: &str =
+    "Ctrl+N/Ctrl+P need a picture result: calculate an image example first";
 
 const EXPORT_UNAVAILABLE: &str =
     "Ctrl+E exports only maze (graph ... grid), image and raycast examples";
@@ -81,6 +83,8 @@ impl Clip {
 pub struct MatrixUi {
     defs: Editor,
     expr: Editor,
+    /// Inverse expression run by Ctrl+P (image examples).
+    back: Editor,
     clipboard: Clip,
     /// File path prompt shown above the result while saving/opening.
     prompt: Option<(Prompt, Editor)>,
@@ -98,6 +102,13 @@ pub struct MatrixUi {
     source: Option<String>,
     /// Input picture matching a large (image-sized) result, drawn next to it.
     before: Option<Matrix>,
+    before_name: Option<String>,
+    /// Result fed back as the input picture: (definitions it applies to, variable, picture).
+    feed: Option<(String, String, Matrix)>,
+    /// Result shown before the last Ctrl+N, so Ctrl+P can restore it exactly.
+    prev_input: Option<Matrix>,
+    back_default: String,
+    example_name: Option<String>,
     expr_help: bool,
     /// First visible line of the definitions editor.
     defs_scroll: usize,
@@ -128,9 +139,13 @@ pub const EXPR_HELP: (&str, &[&str]) = (
         "  ones(r, c)             matrix of ones",
         "Graph search on an adjacency matrix (result is a node vector):",
         "  bfs(A, s)              hops from node s + 1 for every reachable node",
+        "  raycast(I, a)          image I seen by a camera orbited a degrees around y (one ray per pixel)",
         "  astar(A, s, g[, w])    shortest path s -> g as steps 1, 2, ...; w = grid",
         "                         width enables the Manhattan heuristic",
         "  smooth(n)              n x n blur kernel (1 2 1)/4",
+        "  rows(M), cols(M)       size of a matrix, e.g. flip(rows(I)), resize(I, 2 * rows(I), 2 * cols(I))",
+        "  flip(n)                exchange matrix: flip(n) * I mirrors rows, I * flip(n) columns",
+        "  resize(I, rows, cols)  scale an image up or down (shrinking averages pixels)",
         "e.g.  rot(90) * v     rotz(30) * scale(1, 2, 3) * P",
         "      smooth(96) * I * smooth(96)'",
         "Esc / F3 close",
@@ -150,10 +165,14 @@ pub const HELP: (&str, &[&str]) = (
         "Enter          calculate (in expression), F5 anywhere",
         "Arrows, Home/End, Shift  move / select",
         "Ctrl+C/X/V/A   copy / cut / paste / select all",
-        "Ctrl+S         save input    Ctrl+O  open file",
+        "Ctrl+S         save input    Ctrl+O  open .txt / maze .zip / image",
         "Ctrl+R         save result once (asks for a path)",
         "Ctrl+E         export a `graph NAME grid W` maze + A*/BFS solutions as zip;",
         "               image and raycast results as PNG (only in those cases)",
+        "Ctrl+N         image examples: use the latest result as the input picture and",
+        "               calculate again (repeat to chain; reloading/editing definitions resets)",
+        "Ctrl+P         apply the back expression (box below the expression, from the",
+        "               example's `# back:` line, editable) to the latest result = undo Ctrl+N",
         "F2             load an example (also in the main menu)",
         "graph NAME [grid W]  (in definitions) draw matrix NAME as a graph (grid: node i at column i % W)",
         "M = maze W H [seed]  random maze; W, H, seed: numbers or variables (W = 21)",
@@ -170,6 +189,7 @@ impl MatrixUi {
         Self {
             defs: Editor::new("A = [1 2; 3 4]\nB = [0 1; 1 0]"),
             expr: Editor::new("A * B + A'"),
+            back: Editor::new(""),
             clipboard: Clip::default(),
             prompt: None,
             status: None,
@@ -180,6 +200,11 @@ impl MatrixUi {
             legend: false,
             source: None,
             before: None,
+            before_name: None,
+            feed: None,
+            prev_input: None,
+            back_default: String::new(),
+            example_name: None,
             expr_help: false,
             defs_scroll: 0,
             result_scroll: (0, 0),
@@ -202,15 +227,31 @@ impl MatrixUi {
         match self.focus {
             Focus::Defs => &mut self.defs,
             Focus::Expr => &mut self.expr,
+            Focus::Back => &mut self.back,
         }
     }
 
     fn calculate(&mut self, gpu: &Gpu) {
+        let expr = self.expr.text();
+        self.calculate_expr(gpu, &expr);
+    }
+
+    fn calculate_expr(&mut self, gpu: &Gpu, expr: &str) {
         self.status = None;
         self.result_scroll = (0, 0);
-        self.result =
-            Some(evaluate(&self.defs.text(), &self.expr.text(), gpu).map_err(|e| format!("{e:#}")));
-        if let (Some(Ok(m)), Some(path)) = (&self.result, output_path(&self.defs.text())) {
+        let defs = self.defs.text();
+        let mut vars = parse_definitions(&defs);
+        if let (Ok(vars), Some((fed_defs, name, m))) = (&mut vars, &self.feed) {
+            if *fed_defs == defs && vars.contains_key(name) {
+                vars.insert(name.clone(), m.clone());
+            }
+        }
+        self.result = Some(
+            vars.as_ref()
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|v| evaluate_vars(v, expr, gpu).map_err(|e| format!("{e:#}"))),
+        );
+        if let (Some(Ok(m)), Some(path)) = (&self.result, output_path(&defs)) {
             self.status = Some(
                 save_result(&path, m)
                     .map(|_| format!("Result saved to {path}"))
@@ -218,14 +259,16 @@ impl MatrixUi {
             );
         }
         self.graph = None;
-        let defs = self.defs.text();
-        self.before = match (&self.result, parse_definitions(&defs)) {
-            (Some(Ok(r)), Ok(vars)) if is_picture(r) => vars
-                .get("I")
-                .filter(|m| (m.rows, m.cols) == (r.rows, r.cols))
-                .or_else(|| vars.values().find(|m| (m.rows, m.cols) == (r.rows, r.cols)))
-                .cloned(),
-            _ => None,
+        (self.before, self.before_name) = match (&self.result, &vars) {
+            (Some(Ok(r)), Ok(vars)) if is_picture(r) => {
+                let same = |m: &Matrix| (m.rows, m.cols) == (r.rows, r.cols);
+                vars.get_key_value("I")
+                    .filter(|(_, m)| same(m))
+                    .or_else(|| vars.iter().find(|(_, m)| same(m)))
+                    .or_else(|| vars.get_key_value("I").filter(|(_, m)| is_picture(m)))
+                    .map_or((None, None), |(k, m)| (Some(m.clone()), Some(k.clone())))
+            }
+            _ => (None, None),
         };
         if let Some((name, grid)) = graph_spec(&defs) {
             let built = parse_definitions(&defs)
@@ -268,7 +311,12 @@ impl MatrixUi {
                     if let Some(ex) = list.selected().and_then(|i| EXAMPLES.get(i)) {
                         let (defs, expr) = ex.load();
                         self.defs = Editor::new(&defs);
+                        self.feed = None;
+                        self.prev_input = None;
                         self.expr = Editor::new(&expr);
+                        self.back = Editor::new(&ex.back());
+                        self.back_default = ex.back();
+                        self.example_name = Some(ex.title.to_string());
                         self.source = Some(ex.title.to_string());
                         self.focus = Focus::Expr;
                         self.examples = None;
@@ -350,7 +398,11 @@ impl MatrixUi {
                     's' | 'o' | 'r' | 'e' if self.prompt.is_none() => {
                         let (kind, name) = match c.to_ascii_lowercase() {
                             's' => (Prompt::Save, "matrices.txt"),
-                            'o' => (Prompt::Open, "matrices.txt"),
+                            'o' => (
+                                Prompt::Open,
+                                self.export_kind()
+                                    .map_or("matrices.txt", ExportKind::default_name),
+                            ),
                             'e' => match self.export_kind() {
                                 Some(k) => (Prompt::Export(k), k.default_name()),
                                 None => {
@@ -367,6 +419,8 @@ impl MatrixUi {
                                 Some(Err("Nothing to save: calculate a result first".into()));
                         }
                     }
+                    'n' if self.prompt.is_none() => self.feed_result_back(gpu, false),
+                    'p' if self.prompt.is_none() => self.feed_result_back(gpu, true),
                     'c' => {
                         if let Some(t) = self.editor().selected_text() {
                             self.clipboard.set(t);
@@ -404,10 +458,11 @@ impl MatrixUi {
         match key.code {
             KeyCode::Esc => return true,
             KeyCode::Tab | KeyCode::BackTab if self.prompt.is_none() => {
-                self.focus = if self.focus == Focus::Defs {
-                    Focus::Expr
-                } else {
-                    Focus::Defs
+                let back = self.before_name.is_some();
+                self.focus = match self.focus {
+                    Focus::Defs => Focus::Expr,
+                    Focus::Expr if back => Focus::Back,
+                    _ => Focus::Defs,
                 }
             }
             KeyCode::F(5) => self.calculate(gpu),
@@ -416,6 +471,9 @@ impl MatrixUi {
                 self.examples = Some(ListState::default().with_selected(Some(0)));
             }
             KeyCode::Enter if self.prompt.is_some() => {}
+            KeyCode::Enter if !multiline && self.focus == Focus::Back => {
+                self.feed_result_back(gpu, true)
+            }
             KeyCode::Enter if !multiline => self.calculate(gpu),
             KeyCode::Enter => self.editor().insert_str("\n"),
             KeyCode::Backspace => self.editor().backspace(),
@@ -443,16 +501,64 @@ impl MatrixUi {
             },
             Prompt::Export(kind) => self.export(kind, path),
             Prompt::Open => load_input(path).map(|(defs, expr)| {
+                let old = crate::matrix::main_size(&self.defs.text());
+                let new = crate::matrix::main_size(&defs);
                 self.defs = Editor::new(&defs);
-                if let Some(e) = expr {
-                    self.expr = Editor::new(&e);
+                self.feed = None;
+                self.prev_input = None;
+                match expr {
+                    Some(e) => self.expr = Editor::new(&e),
+                    // Keep the current expressions but fit their sizes to the opened matrix.
+                    None => {
+                        if let (Some(old), Some(new)) = (old, new) {
+                            for ed in [&mut self.expr, &mut self.back] {
+                                *ed =
+                                    Editor::new(&crate::matrix::remap_sizes(&ed.text(), old, new));
+                            }
+                        }
+                    }
                 }
                 self.result = None;
-                self.source = Some(path.to_string());
+                self.source = Some(match &self.example_name {
+                    Some(ex) => format!("{ex} | {path}"),
+                    None => path.to_string(),
+                });
                 format!("Loaded {path}")
             }),
         };
         done.map_err(|e| format!("{e:#}"))
+    }
+
+    /// Ctrl+N: the latest picture result becomes the input picture, then the expression runs again.
+    /// Ctrl+N (forward expression) / Ctrl+P (back expression): the latest picture result becomes
+    /// the input picture, then the chosen expression is calculated.
+    fn feed_result_back(&mut self, gpu: &Gpu, back: bool) {
+        let expr = if back { &self.back } else { &self.expr }.text();
+        if back && expr.trim().is_empty() {
+            self.status = Some(Err("Ctrl+P needs a back expression (the box below)".into()));
+            return;
+        }
+        match (&self.before_name, &self.result) {
+            (Some(name), Some(Ok(r))) => {
+                let (name, r) = (name.clone(), r.clone());
+                let prev = Some(r.clone());
+                let restore = back && expr.trim() == self.back_default.trim();
+                self.feed = Some((self.defs.text(), name, r));
+                self.calculate_expr(gpu, &expr);
+                if back {
+                    // The default back expression returns to the exact picture before Ctrl+N.
+                    let exact = self.prev_input.take();
+                    if let (true, Some(Ok(res)), Some(p)) = (restore, &self.result, exact) {
+                        if (res.rows, res.cols) == (p.rows, p.cols) {
+                            self.result = Some(Ok(p));
+                        }
+                    }
+                } else {
+                    self.prev_input = prev;
+                }
+            }
+            _ => self.status = Some(Err(FEED_UNAVAILABLE.into())),
+        }
     }
 
     /// What Ctrl+E can export for the current definitions/result, if anything.
@@ -461,10 +567,6 @@ impl MatrixUi {
             Some(ExportKind::Maze)
         } else if self.before.is_some() {
             Some(ExportKind::Image)
-        } else if matches!(self.result, Some(Ok(_)))
-            && is_raycast(&self.defs.text(), &self.expr.text())
-        {
-            Some(ExportKind::Raycast)
         } else {
             None
         }
@@ -473,7 +575,7 @@ impl MatrixUi {
     fn export(&self, kind: ExportKind, path: &str) -> anyhow::Result<String> {
         match kind {
             ExportKind::Maze => self.export_maze(path),
-            ExportKind::Image | ExportKind::Raycast => match &self.result {
+            ExportKind::Image => match &self.result {
                 Some(Ok(m)) => {
                     crate::matrix::save_png(path, m)?;
                     Ok(format!("Image saved to {path}"))
@@ -541,9 +643,14 @@ impl MatrixUi {
             defs_height - 2,
             self.defs.line_count(),
         );
-        let [defs, expr, prompt, result] = Layout::vertical([
+        let show_back = self.before_name.is_some();
+        if !show_back && self.focus == Focus::Back {
+            self.focus = Focus::Expr;
+        }
+        let [defs, expr, back, prompt, result] = Layout::vertical([
             Constraint::Length(defs_height as u16),
             Constraint::Length(3),
+            Constraint::Length(if show_back { 3 } else { 0 }),
             Constraint::Length(if self.prompt.is_some() { 3 } else { 0 }),
             Constraint::Min(3),
         ])
@@ -556,7 +663,9 @@ impl MatrixUi {
                     " Export maze + solutions as zip (Enter: save, Esc: cancel) "
                 }
                 Prompt::Export(_) => " Export result as PNG image (Enter: save, Esc: cancel) ",
-                Prompt::Open => " Open file (Enter: load, Esc: cancel) ",
+                Prompt::Open => {
+                    " Open matrices .txt, maze .zip or image file (Enter: load, Esc: cancel) "
+                }
             };
             frame.render_widget(
                 Paragraph::new(ed.lines(true)).block(
@@ -602,11 +711,25 @@ impl MatrixUi {
             )
             .block(
                 Block::bordered()
-                    .title(" Expr: + - * ' ( )  rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth det trace  (F3: help) ")
+                    .title(" Expr: + - * ' ( )  rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth flip det trace  (F3: help) ")
                     .border_style(focused(Focus::Expr)),
             ),
             expr,
         );
+        if show_back {
+            frame.render_widget(
+                Paragraph::new(
+                    self.back
+                        .lines(self.prompt.is_none() && self.focus == Focus::Back),
+                )
+                .block(
+                    Block::bordered()
+                        .title(" Back expr: Ctrl+P / Enter here applies it to the latest result (undoes the expression) ")
+                        .border_style(focused(Focus::Back)),
+                ),
+                back,
+            );
+        }
         let (lines, style) = match &self.result {
             None => (
                 vec![Line::from(
@@ -830,15 +953,6 @@ fn scroll_offset(offset: usize, cursor: usize, visible: usize, total: usize) -> 
 }
 
 /// Results this big are pictures rather than numbers worth reading.
-/// A raycast rotates the camera and multiplies it with the ray directions `D`.
-fn is_raycast(defs: &str, expr: &str) -> bool {
-    ["rotx(", "roty(", "rotz("].iter().any(|r| expr.contains(r))
-        && expr
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|w| w == "D")
-        && defs.lines().any(|l| l.trim_start().starts_with("D ="))
-}
-
 fn is_picture(m: &Matrix) -> bool {
     m.rows >= 8 && m.cols >= 8
 }
@@ -898,10 +1012,107 @@ mod tests {
         assert_eq!(kind("Graph: node degrees"), None);
         assert_eq!(kind("Lighting: Lambert shading"), None);
         assert_eq!(
-            kind("Lighting: raycast facets vs. rays"),
-            Some(ExportKind::Raycast)
+            kind("Photo: raycast (camera rotated 40 degrees)"),
+            Some(ExportKind::Image)
         );
         assert_eq!(kind("Lighting: moved light"), None);
+    }
+
+    #[test]
+    fn ctrl_n_feeds_result_back_as_input() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        ui.defs = Editor::new("I = image builtin:earth");
+        ui.expr = Editor::new("0.5 * I");
+        ui.calculate(&gpu);
+        let (first, input) = (
+            ui.result.clone().unwrap().unwrap(),
+            ui.before.clone().unwrap(),
+        );
+        ui.feed_result_back(&gpu, false);
+        let second = ui.result.clone().unwrap().unwrap();
+        assert_eq!(ui.before.as_ref().unwrap().data, first.data);
+        assert!((second.data[1000] - 0.25 * input.data[1000]).abs() < 1e-5);
+        ui.defs = Editor::new("I = image builtin:earth\n# changed");
+        ui.calculate(&gpu);
+        assert!((ui.result.unwrap().unwrap().data[1000] - 0.5 * input.data[1000]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ctrl_p_restores_raycast_exactly() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        let ex = EXAMPLES
+            .iter()
+            .find(|e| e.title.contains("aycast"))
+            .unwrap();
+        let (defs, expr) = ex.load();
+        ui.defs = Editor::new(&defs);
+        ui.expr = Editor::new(&expr);
+        ui.back = Editor::new(&ex.back());
+        ui.back_default = ex.back();
+        ui.calculate(&gpu);
+        let first = ui.result.clone().unwrap().unwrap();
+        ui.feed_result_back(&gpu, false);
+        assert_ne!(ui.result.clone().unwrap().unwrap().data, first.data);
+        ui.feed_result_back(&gpu, true);
+        assert_eq!(ui.result.clone().unwrap().unwrap().data, first.data);
+    }
+
+    #[test]
+    fn ctrl_p_applies_back_expression_to_latest_result() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        let (defs, expr) = EXAMPLES
+            .iter()
+            .find(|e| e.title == "Photo: enhance contrast/brightness")
+            .unwrap()
+            .load();
+        ui.defs = Editor::new(&defs);
+        ui.expr = Editor::new(&expr);
+        ui.back = Editor::new(
+            &EXAMPLES
+                .iter()
+                .find(|e| e.title == "Photo: enhance contrast/brightness")
+                .unwrap()
+                .back(),
+        );
+        ui.calculate(&gpu);
+        let first = ui.result.clone().unwrap().unwrap();
+        ui.feed_result_back(&gpu, false);
+        assert_ne!(ui.result.clone().unwrap().unwrap().data, first.data);
+        ui.feed_result_back(&gpu, true);
+        let back = ui.result.clone().unwrap().unwrap();
+        assert!(
+            back.data
+                .iter()
+                .zip(&first.data)
+                .all(|(a, b)| (a - b).abs() < 1e-4)
+        );
+        ui.back = Editor::new("");
+        ui.feed_result_back(&gpu, true);
+        assert!(matches!(ui.status, Some(Err(_))));
+    }
+
+    #[test]
+    fn scale_down_example_shows_original_and_scaled() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        let ex = EXAMPLES
+            .iter()
+            .find(|e| e.title == "Photo: scale down (half size)")
+            .unwrap();
+        let (defs, expr) = ex.load();
+        ui.defs = Editor::new(&defs);
+        ui.expr = Editor::new(&expr);
+        ui.back = Editor::new(&ex.back());
+        ui.calculate(&gpu);
+        let r = ui.result.clone().unwrap().unwrap();
+        assert_eq!((r.rows, r.cols), (48, 48));
+        assert_eq!(ui.before.as_ref().map(|b| b.rows), Some(96));
+        ui.feed_result_back(&gpu, true);
+        let up = ui.result.clone().unwrap().unwrap();
+        assert_eq!((up.rows, up.cols), (96, 96));
     }
 
     #[test]

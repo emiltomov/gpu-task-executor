@@ -1,0 +1,3 @@
+# Edges: the difference between the photo and its blur, lifted to mid gray.
+# (not invertible, so no back expression)
+I - smooth(96) * I * smooth(96)' + 0.5

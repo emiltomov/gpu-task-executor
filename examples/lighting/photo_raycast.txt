@@ -1,0 +1,5 @@
+# Raycast: one ray per output pixel from a camera orbited 40 degrees around the y axis; each
+# ray hits the photo plane and samples the photo there (black where it misses). Before/after shown
+# in the UI; try other angles, or Ctrl+N to keep turning the result.
+# back: raycast(I, -40)
+raycast(I, 40)

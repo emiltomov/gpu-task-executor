@@ -1,0 +1,3 @@
+# Sharpen (unsharp mask): add back the detail the blur removed, I + (I - blur(I)).
+# back: smooth(96) * I * smooth(96)'
+2 * I - smooth(96) * I * smooth(96)'

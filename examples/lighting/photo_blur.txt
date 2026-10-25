@@ -1,2 +1,3 @@
 # Blur as matrix products: smooth(96) is a 96x96 (1 2 1)/4 kernel; S*I*S' smooths rows and columns.
+# back: 2 * I - smooth(96) * I * smooth(96)'
 smooth(96) * I * smooth(96)'

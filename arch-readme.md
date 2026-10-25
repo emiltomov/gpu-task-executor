@@ -193,7 +193,7 @@ Details:
 |---|---|
 | `examples/markov/` | `chain.txt` + `two_days`, `steady` |
 | `examples/graph/` | `graph.txt` + `degrees`, `neighbors`, `walks3`, `reach3` |
-| `examples/lighting/` | `scene.txt` (shading, moved light, raycast) and `photo.txt` + `photo_enhance`, `photo_blur`, `photo_lift` |
+| `examples/lighting/` | `scene.txt` (shading, moved light) and `photo.txt` + `photo_raycast`, `photo_enhance`, `photo_blur`, `photo_lift`, sharpen/edges/negative/scale/mirror/rotate |
 
 Available from the main menu, `F2` in the Matrices screen and `gtu --example`. A test evaluates every example on the GPU.
 

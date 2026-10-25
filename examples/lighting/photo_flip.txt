@@ -1,0 +1,4 @@
+# Mirror left/right: multiply by the exchange matrix flip(cols(I)) from the right
+# (flip(cols(I)) * I would mirror top/bottom).
+# back: I * flip(cols(I))
+I * flip(cols(I))
