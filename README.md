@@ -2,6 +2,12 @@
 
 A Rust terminal UI (`ratatui`) that runs compute workloads on the GPU via `wgpu` (WGSL shaders).
 
+<div align="center">
+  <img src="docs/GTU-Demo-Session.gif" alt="gtu demo session: matrix calculator, examples, graph and photo before/after" width="800">
+  <br>
+  <sub>Demo session: matrix calculator, bundled examples, graph view and photo before/after.</sub>
+</div>
+
 ## Features
 
 - **Mandelbrot** – per-pixel iteration counts computed on the GPU; pan and zoom.
