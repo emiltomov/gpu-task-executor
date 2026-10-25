@@ -71,6 +71,8 @@ pub struct MatrixUi {
     /// Input picture matching a large (image-sized) result, drawn next to it.
     before: Option<Matrix>,
     expr_help: bool,
+    /// First visible line of the definitions editor.
+    defs_scroll: usize,
     focus: Focus,
     result: Option<Result<Matrix, String>>,
 }
@@ -132,6 +134,7 @@ impl MatrixUi {
             graph: None,
             before: None,
             expr_help: false,
+            defs_scroll: 0,
             focus: Focus::Expr,
             result: None,
         }
@@ -348,8 +351,16 @@ impl MatrixUi {
             );
             return;
         }
+        let max_defs = (area.height as usize * 35 / 100).max(3);
+        let defs_height = (self.defs.line_count() + 2).min(max_defs);
+        self.defs_scroll = scroll_offset(
+            self.defs_scroll,
+            self.defs.cursor_line(),
+            defs_height - 2,
+            self.defs.line_count(),
+        );
         let [defs, expr, prompt, result] = Layout::vertical([
-            Constraint::Length(self.defs.line_count() as u16 + 2),
+            Constraint::Length(defs_height as u16),
             Constraint::Length(3),
             Constraint::Length(if self.prompt.is_some() { 3 } else { 0 }),
             Constraint::Min(3),
@@ -382,9 +393,18 @@ impl MatrixUi {
                 self.defs
                     .lines(self.prompt.is_none() && self.focus == Focus::Defs),
             )
+            .scroll((self.defs_scroll as u16, 0))
             .block(
                 Block::bordered()
-                    .title(" Matrices (NAME = [row; row; ...]) ")
+                    .title(if self.defs.line_count() > defs_height - 2 {
+                        format!(
+                            " Matrices (line {}/{}) ",
+                            self.defs.cursor_line() + 1,
+                            self.defs.line_count()
+                        )
+                    } else {
+                        " Matrices (NAME = [row; row; ...]) ".to_string()
+                    })
                     .border_style(focused(Focus::Defs)),
             ),
             defs,
@@ -466,6 +486,18 @@ impl MatrixUi {
     }
 }
 
+/// Keeps the cursor line inside a window of `visible` lines, moving it as little as possible.
+fn scroll_offset(offset: usize, cursor: usize, visible: usize, total: usize) -> usize {
+    let offset = if cursor < offset {
+        cursor
+    } else if cursor >= offset + visible {
+        cursor + 1 - visible
+    } else {
+        offset
+    };
+    offset.min(total.saturating_sub(visible))
+}
+
 /// Results this big are pictures rather than numbers worth reading.
 fn is_picture(m: &Matrix) -> bool {
     m.rows >= 8 && m.cols >= 8
@@ -521,6 +553,15 @@ mod tests {
         ui.calculate(&gpu);
         let before = ui.before.expect("before picture");
         assert_eq!((before.rows, before.cols), (96, 96));
+    }
+
+    #[test]
+    fn scroll_follows_cursor() {
+        assert_eq!(scroll_offset(0, 3, 5, 20), 0);
+        assert_eq!(scroll_offset(0, 7, 5, 20), 3);
+        assert_eq!(scroll_offset(3, 4, 5, 20), 3);
+        assert_eq!(scroll_offset(3, 1, 5, 20), 1);
+        assert_eq!(scroll_offset(9, 4, 5, 6), 1);
     }
 
     #[test]
