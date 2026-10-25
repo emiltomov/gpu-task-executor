@@ -328,7 +328,7 @@ pub fn draw(
                 };
                 // Mazes get fat dots; other graphs get circles.
                 if g.maze.is_some() {
-                    ctx.print(x, y, Span::styled("●", Style::new().fg(color)));
+                    ctx.print(x, y, Span::styled("•", Style::new().fg(color)));
                 } else {
                     ctx.draw(&Circle {
                         x,

@@ -11,7 +11,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Clear, List, ListState, Paragraph},
 };
 
@@ -72,6 +72,8 @@ pub struct MatrixUi {
     graph_view: View,
     /// While set, arrows pan and +/- zoom the graph instead of editing.
     graph_focus: bool,
+    /// Legend popup for the graph symbols and colors.
+    legend: bool,
     /// Name of the loaded example or file, shown in the result title.
     source: Option<String>,
     /// Input picture matching a large (image-sized) result, drawn next to it.
@@ -136,6 +138,7 @@ pub const HELP: (&str, &[&str]) = (
         "M = maze W H [seed]  random maze; W, H, seed: numbers or variables (W = 21)",
         "F3             expression help: all operations",
         "F4             graph view: arrows pan, +/- zoom, 0 reset, F4/Esc back",
+        "F6             legend of graph symbols and colors (also L in graph view)",
         "F1             this help",
         "Esc            back",
     ],
@@ -153,6 +156,7 @@ impl MatrixUi {
             graph: None,
             graph_view: View::default(),
             graph_focus: false,
+            legend: false,
             source: None,
             before: None,
             expr_help: false,
@@ -254,8 +258,19 @@ impl MatrixUi {
             }
             return false;
         }
+        if self.legend {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(6) | KeyCode::Char('l')) {
+                self.legend = false;
+            }
+            return false;
+        }
+        if self.graph_focus && key.code == KeyCode::Char('l') {
+            self.legend = true;
+            return false;
+        }
         if self.graph_focus {
             match key.code {
+                KeyCode::F(6) => self.legend = true,
                 KeyCode::Esc | KeyCode::F(4) => self.graph_focus = false,
                 KeyCode::Left => self.graph_view.pan(-0.5, 0.0),
                 KeyCode::Right => self.graph_view.pan(0.5, 0.0),
@@ -265,6 +280,14 @@ impl MatrixUi {
                 KeyCode::Char('-' | '_') | KeyCode::PageDown => self.graph_view.zoom_by(1.0 / 1.5),
                 KeyCode::Char('0') | KeyCode::Home => self.graph_view = View::default(),
                 _ => {}
+            }
+            return false;
+        }
+        if key.code == KeyCode::F(6) && self.prompt.is_none() {
+            if self.graph.is_some() {
+                self.legend = true;
+            } else {
+                self.status = Some(Err("No graph: add a `graph NAME` line and calculate".into()));
             }
             return false;
         }
@@ -556,12 +579,25 @@ impl MatrixUi {
             Some(name) => format!(" Result: {name}{mode} "),
             None => format!(" Result{mode} "),
         };
-        let hint = if self.graph_focus {
-            " arrows: pan  +/- or PgUp/PgDn: zoom  0/Home: reset  F4/Esc: back to editing "
+        let hints: &[&str] = if self.graph_focus {
+            &[
+                " arrows: pan  +/- PgUp/PgDn: zoom  0/Home: reset  F6/L: legend  F4/Esc: back ",
+                " arrows pan  +/- zoom  0 reset  F6 legend  Esc back ",
+                " arrows +/- 0 F6 Esc ",
+            ]
         } else {
-            " Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+E export maze zip  Ctrl+O open  F2: examples  F3: expr help  F4: graph zoom  F1: help  Esc: back "
+            &[
+                " Tab: switch  Enter: calc  Ctrl+S save  Ctrl+R result  Ctrl+E maze zip  Ctrl+O open  F2: examples  F3: operations list  F4: graph  F6: legend  F1: help  Esc: back ",
+                " Tab  Enter: calc  ^S save  ^R result  ^E zip  ^O open  F1: all keys  Esc ",
+                " Enter: calc  F1: all keys  Esc ",
+            ]
         };
-        let outer = Block::bordered().title(title).title_bottom(hint);
+        let room = result.width.saturating_sub(2) as usize;
+        let hint = hints
+            .iter()
+            .find(|h| h.chars().count() <= room)
+            .unwrap_or(&hints[hints.len() - 1]);
+        let outer = Block::bordered().title(title).title_bottom(*hint);
         let inner = outer.inner(result);
         frame.render_widget(outer, result);
         if let (Some(before), Some(Ok(after))) = (&self.before, &self.result) {
@@ -645,9 +681,74 @@ impl MatrixUi {
                 self.graph_focus,
             );
         }
+        if let (true, Some((_, g))) = (self.legend, &self.graph) {
+            draw_legend(frame, area, g.maze.is_some());
+        }
     }
 }
 
+/// Popup explaining the symbols and colors of the graph drawing.
+fn draw_legend(frame: &mut Frame, area: Rect, maze: bool) {
+    let item = |glyph: &'static str, color: Color, text: &'static str| {
+        Line::from(vec![
+            Span::styled(format!(" {glyph} "), Style::new().fg(color)),
+            Span::raw(text),
+        ])
+    };
+    let mut lines = if maze {
+        vec![
+            item("●", Color::Cyan, "cell (node)"),
+            item("●", Color::Red, "dead end (a single passage)"),
+            item(
+                "●",
+                Color::Yellow,
+                "cell with a value > 0 in the result (A* path, BFS)",
+            ),
+            item("━", Color::Green, "passage on the longest path"),
+            item("━", Color::DarkGray, "other passage"),
+            item("┃", Color::Magenta, "wall"),
+        ]
+    } else {
+        vec![
+            item("○", Color::Cyan, "node"),
+            item("○", Color::Green, "node with a value > 0 in the result"),
+            item(
+                "─",
+                Color::DarkGray,
+                "edge (an arrowhead marks one-way edges)",
+            ),
+            item(
+                "1",
+                Color::Yellow,
+                "edge weight (weighted graphs, when zoomed in)",
+            ),
+        ]
+    };
+    lines.push(item(
+        "i=v",
+        Color::Cyan,
+        "node i with result value v (when zoomed in)",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(" F4 focus: arrows pan, +/- zoom, 0 reset"));
+    let width = (lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(" Legend ")
+                .title_bottom(" F6/Esc: close "),
+        ),
+        popup,
+    );
+}
 /// Keeps the cursor line inside a window of `visible` lines, moving it as little as possible.
 fn scroll_offset(offset: usize, cursor: usize, visible: usize, total: usize) -> usize {
     let offset = if cursor < offset {
@@ -737,6 +838,17 @@ mod tests {
         key(&mut ui, KeyCode::Char('+'));
         key(&mut ui, KeyCode::Right);
         assert!(ui.graph_view.zoom > 1.0 && ui.graph_view.cx > 0.0);
+        key(&mut ui, KeyCode::Char('l'));
+        assert!(ui.legend);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| ui.draw(f, f.area())).unwrap();
+        assert!(format!("{}", terminal.backend()).contains("dead end"));
+        key(&mut ui, KeyCode::Esc);
+        assert!(!ui.legend && ui.graph_focus, "Esc closes only the legend");
+        key(&mut ui, KeyCode::F(6));
+        assert!(ui.legend);
+        key(&mut ui, KeyCode::F(6));
         assert!(!key(&mut ui, KeyCode::Esc) && !ui.graph_focus);
 
         for zoom in [1.0, 8.0] {
