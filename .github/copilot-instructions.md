@@ -6,6 +6,7 @@ Rust TUI app (`ratatui`) that runs compute workloads on the GPU via `wgpu` (WGSL
 
 - Build/run: `cargo build`, `cargo run` (needs a real terminal); the binary is named `gtu`. `cargo run -- -i m.txt -e e.txt` runs the matrix CLI without UI (`cli.rs`).
 - Test: `cargo test`; single test: `cargo test blinker_oscillates_on_gpu`
+- CI (`.github/workflows/rust.yml`) runs only `cargo build` and `cargo test` on PRs to `main`; no lint config exists.
 - GPU tests return early (pass) when no adapter is available.
 
 ## Architecture
@@ -15,7 +16,8 @@ Rust TUI app (`ratatui`) that runs compute workloads on the GPU via `wgpu` (WGSL
 - `gpu.rs`: `Gpu` (device, queue, adapter info) created once at startup and shared by all screens.
 - `mandelbrot.rs` + `mandelbrot.wgsl`: per-pixel iteration counts, cached by (width, height, view).
 - `automata.rs` + `automata.wgsl`: Game of Life and Lenia on ping-pong storage buffers; state stays on the GPU and is read back only for drawing. Both entry points share one bind-group layout, so `life` must reference the `kernel` binding.
-- `matrix.rs` + `matrix.wgsl` + `matrix_ui.rs`: matrix expressions (`Matrix`, tokenizer/parser, `Backend` trait implemented by `Gpu`; each operation is one GPU dispatch with readback, so composed expressions chain GPU ops). Tests compare against a CPU backend.
+- `matrix.rs` + `matrix.wgsl` + `matrix_ui.rs`: matrix expressions (`Matrix`, tokenizer/parser, `Backend` trait implemented by `Gpu`; each operation is one GPU dispatch with readback, so composed expressions chain GPU ops). Tests compare against a CPU backend. `examples/` files are embedded via `examples.rs` (new examples need an entry there).
+- `editor.rs`: minimal multi-line text buffer (cursor/selection) used by the matrix editors; `graph.rs`: draws a `Matrix` as a node graph on a ratatui canvas.
 - `automata_ui.rs`: setup form and run screen. Grid size follows the terminal (Life: braille, 2x4 cells per character; Lenia: half blocks, 1x2); a resize restarts the simulation.
 - `gpu.rs` `Gpu::run` (vecadd/saxpy/square, uses `shader.wgsl`) is currently unused.
 

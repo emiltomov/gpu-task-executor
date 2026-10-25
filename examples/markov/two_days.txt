@@ -1,0 +1,2 @@
+# Probability of each weather in two days, starting from sunny.
+s * P*P

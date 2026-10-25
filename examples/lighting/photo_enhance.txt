@@ -1,0 +1,2 @@
+# Brighten and add contrast: 1.6*I - 0.25 (before/after shown below).
+1.6 * I - 0.25

@@ -1,0 +1,3 @@
+# Raycast: rotate the camera 20 degrees around y; entry (facet, ray) is how
+# directly that ray looks at the facet (cosine of the angle).
+N * roty(20) * D

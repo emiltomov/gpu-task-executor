@@ -28,6 +28,14 @@ impl Editor {
         self.chars.iter().filter(|&&c| c == '\n').count() + 1
     }
 
+    /// Zero-based line the cursor is on.
+    pub fn cursor_line(&self) -> usize {
+        self.chars[..self.cur]
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count()
+    }
+
     fn selection(&self) -> Option<(usize, usize)> {
         let a = self.anchor.filter(|&a| a != self.cur)?;
         Some((a.min(self.cur), a.max(self.cur)))

@@ -1,0 +1,6 @@
+# Weather Markov chain. State order: [sunny rainy]; rows are "from", columns "to".
+P = [0.9 0.1; 0.5 0.5]
+graph P
+# Today is sunny (row vector of state probabilities).
+s = [1 0]
+# expr: s * P*P*P
