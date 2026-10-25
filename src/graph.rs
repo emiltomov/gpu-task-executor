@@ -31,6 +31,8 @@ pub struct MazeInfo {
     /// Undirected edges (smaller index first) along the longest path.
     pub longest: HashSet<(usize, usize)>,
     pub dead_ends: Vec<usize>,
+    /// Grid size in cells (width, height); walls are drawn where there is no passage.
+    pub grid: (usize, usize),
 }
 
 impl Graph {
@@ -55,7 +57,7 @@ impl Graph {
             Some(w) => grid_layout(n, w),
             None => layout(n, &edges),
         };
-        let maze = grid.map(|_| maze_info(n, &edges));
+        let maze = grid.map(|w| maze_info(n, w, &edges));
         let min_dist = min_distance(&pos);
         Ok(Self {
             n,
@@ -83,7 +85,7 @@ fn min_distance(pos: &[(f64, f64)]) -> f64 {
 }
 
 /// Longest path (tree diameter by double BFS, exact for mazes) and dead ends (one neighbor).
-fn maze_info(n: usize, edges: &[(usize, usize, f32)]) -> MazeInfo {
+fn maze_info(n: usize, width: usize, edges: &[(usize, usize, f32)]) -> MazeInfo {
     let mut adj = vec![Vec::new(); n];
     for &(a, b, _) in edges.iter().filter(|e| e.0 != e.1) {
         adj[a].push(b);
@@ -121,7 +123,11 @@ fn maze_info(n: usize, edges: &[(usize, usize, f32)]) -> MazeInfo {
         }
     }
     let dead_ends = (0..n).filter(|&i| adj[i].len() == 1).collect();
-    MazeInfo { longest, dead_ends }
+    MazeInfo {
+        longest,
+        dead_ends,
+        grid: (width, n.div_ceil(width)),
+    }
 }
 
 fn grid_layout(n: usize, w: usize) -> Vec<(f64, f64)> {
@@ -253,6 +259,8 @@ pub fn draw(
     let labels = columns_per_node >= 4.0;
     let weighted = g.edges.iter().any(|e| e.2 != 1.0);
     let edge_set: HashSet<(usize, usize)> = g.edges.iter().map(|e| (e.0, e.1)).collect();
+    // Width of one terminal column in canvas units.
+    let cell_w = 2.0 * hw / inner.width.max(1) as f64;
     let canvas = Canvas::default()
         .block(block)
         .marker(Marker::Braille)
@@ -260,6 +268,9 @@ pub fn draw(
         .y_bounds([cy - hh, cy + hh])
         .paint(|ctx| {
             let p = |i: usize| (g.pos[i].0 * aspect, g.pos[i].1);
+            if let Some(m) = &g.maze {
+                draw_walls(ctx, g, m, aspect, &edge_set);
+            }
             for &(a, b, w) in &g.edges {
                 if a == b {
                     continue;
@@ -315,22 +326,71 @@ pub fn draw(
                 } else {
                     Color::Cyan
                 };
-                ctx.draw(&Circle {
-                    x,
-                    y,
-                    radius,
-                    color,
-                });
+                // Mazes get fat dots; other graphs get circles.
+                if g.maze.is_some() {
+                    ctx.print(x, y, Span::styled("●", Style::new().fg(color)));
+                } else {
+                    ctx.draw(&Circle {
+                        x,
+                        y,
+                        radius,
+                        color,
+                    });
+                }
                 if labels {
                     let label = match values.and_then(|v| v.get(i)) {
                         Some(v) => format!("{i}={}", fmt_num(*v)),
                         None => i.to_string(),
                     };
-                    ctx.print(x, y, Span::styled(label, Style::new().fg(color)));
+                    // Leave the dot's column free in mazes.
+                    let dx = if g.maze.is_some() { cell_w } else { 0.0 };
+                    ctx.print(x + dx, y, Span::styled(label, Style::new().fg(color)));
                 }
             }
         });
     frame.render_widget(canvas, area);
+}
+
+const WALL_COLOR: Color = Color::Magenta;
+
+/// Draws maze walls around every cell side that has no passage (and the outer border).
+fn draw_walls(
+    ctx: &mut ratatui::widgets::canvas::Context,
+    g: &Graph,
+    m: &MazeInfo,
+    aspect: f64,
+    edges: &HashSet<(usize, usize)>,
+) {
+    let (w, h) = m.grid;
+    let open = |a: usize, b: usize| edges.contains(&(a, b)) || edges.contains(&(b, a));
+    let sy = if h > 1 { g.pos[0].1 - g.pos[w].1 } else { 1.8 };
+    let sx = if w > 1 { g.pos[1].0 - g.pos[0].0 } else { sy };
+    let (hx, hy) = (sx * aspect / 2.0, sy / 2.0);
+    let mut line = |x1: f64, y1: f64, x2: f64, y2: f64| {
+        ctx.draw(&Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            color: WALL_COLOR,
+        });
+    };
+    for i in 0..g.n {
+        let (x, y) = (g.pos[i].0 * aspect, g.pos[i].1);
+        let (col, row) = (i % w, i / w);
+        if col == 0 {
+            line(x - hx, y - hy, x - hx, y + hy);
+        }
+        if row == 0 {
+            line(x - hx, y + hy, x + hx, y + hy);
+        }
+        if col + 1 == w || !open(i, i + 1) {
+            line(x + hx, y - hy, x + hx, y + hy);
+        }
+        if i + w >= g.n || !open(i, i + w) {
+            line(x - hx, y - hy, x + hx, y - hy);
+        }
+    }
 }
 
 fn arrowhead(
