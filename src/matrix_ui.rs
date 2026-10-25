@@ -147,7 +147,7 @@ pub const EXPR_HELP: (&str, &[&str]) = (
         "  flip(n)                exchange matrix: flip(n) * I mirrors rows, I * flip(n) columns",
         "  resize(I, rows, cols)  scale an image up or down (shrinking averages pixels)",
         "e.g.  rot(90) * v     rotz(30) * scale(1, 2, 3) * P",
-        "      smooth(96) * I * smooth(96)'",
+        "      smooth(rows(I)) * I * smooth(cols(I))'",
         "Esc / F3 close",
     ],
 );
@@ -1036,6 +1036,26 @@ mod tests {
         ui.defs = Editor::new("I = image builtin:earth\n# changed");
         ui.calculate(&gpu);
         assert!((ui.result.unwrap().unwrap().data[1000] - 0.5 * input.data[1000]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn photo_examples_work_on_non_square_images() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let img = Matrix {
+            rows: 106,
+            cols: 128,
+            data: vec![0.5; 106 * 128],
+        };
+        for ex in EXAMPLES.iter().filter(|e| e.title.starts_with("Photo")) {
+            let (_, expr) = ex.load();
+            let vars = std::collections::HashMap::from([("I".to_string(), img.clone())]);
+            evaluate_vars(&vars, &expr, &gpu).unwrap_or_else(|e| panic!("{}: {e:#}", ex.title));
+            let back = ex.back();
+            if !back.is_empty() {
+                evaluate_vars(&vars, &back, &gpu)
+                    .unwrap_or_else(|e| panic!("{} (back): {e:#}", ex.title));
+            }
+        }
     }
 
     #[test]
