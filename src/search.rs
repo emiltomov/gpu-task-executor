@@ -225,7 +225,7 @@ pub fn save_maze_bundle(
             format!("result = {}\n", r.to_literal()),
         ));
     }
-    let file = std::fs::File::create(path).with_context(|| format!("cannot write '{path}'"))?;
+    let file = std::fs::File::create(crate::matrix::expand_tilde(path)).with_context(|| format!("cannot write '{path}'"))?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
     for (name, text) in files {

@@ -124,6 +124,17 @@ pub fn parse_definitions(text: &str) -> Result<HashMap<String, Matrix>> {
     Ok(vars)
 }
 
+/// Expands a leading `~` to the home directory (the OS does not do it for us).
+pub fn expand_tilde(path: &str) -> String {
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            format!("{home}{rest}")
+        }
+        _ => path.to_string(),
+    }
+}
+
 fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Result<()> {
     for (n, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -134,7 +145,8 @@ fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Res
             continue;
         }
         if let Some(path) = line.strip_prefix("include ") {
-            let path = path.trim();
+            let path = expand_tilde(path.trim());
+            let path = path.as_str();
             if depth >= MAX_INCLUDE_DEPTH {
                 bail!("line {}: includes nested too deeply", n + 1);
             }
@@ -196,7 +208,7 @@ fn load_image(spec: &str) -> Result<Matrix> {
     let img = if spec == "builtin:earth" {
         image::load_from_memory(EARTH_PNG)?
     } else {
-        image::open(spec).with_context(|| format!("cannot read image '{spec}'"))?
+        image::open(expand_tilde(spec)).with_context(|| format!("cannot read image '{spec}'"))?
     };
     let img = if img.width().max(img.height()) > MAX_IMAGE_SIDE {
         img.thumbnail(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE)
@@ -230,12 +242,13 @@ pub fn output_path(defs: &str) -> Option<String> {
         .find_map(|l| l.trim().strip_prefix("output "))
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
+        .map(|p| expand_tilde(&p))
 }
 
 /// Saves the definitions plus the expression (as a `# expr:` comment, so the file stays includable).
 pub fn save_input(path: &str, defs: &str, expr: &str) -> Result<()> {
     let text = format!("{}\n{EXPR_PREFIX} {expr}\n", defs.trim_end());
-    std::fs::write(path, text).with_context(|| format!("cannot write '{path}'"))
+    std::fs::write(expand_tilde(path), text).with_context(|| format!("cannot write '{path}'"))
 }
 
 pub fn result_text(m: &Matrix) -> String {
@@ -244,12 +257,12 @@ pub fn result_text(m: &Matrix) -> String {
 
 /// Saves a result as `result = [..]`, so the file can be opened or included later.
 pub fn save_result(path: &str, m: &Matrix) -> Result<()> {
-    std::fs::write(path, result_text(m)).with_context(|| format!("cannot write '{path}'"))
+    std::fs::write(expand_tilde(path), result_text(m)).with_context(|| format!("cannot write '{path}'"))
 }
 
 /// Returns `(definitions, expression)` from a file written by [`save_input`] (or any definitions file).
 pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read '{path}'"))?;
+    let text = std::fs::read_to_string(expand_tilde(path)).with_context(|| format!("cannot read '{path}'"))?;
     Ok(split_input(&text))
 }
 
@@ -821,6 +834,16 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    use super::expand_tilde;
+
+    #[test]
+    fn tilde_expands_to_home() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(expand_tilde("~/a.zip"), format!("{home}/a.zip"));
+        assert_eq!(expand_tilde("a/~b"), "a/~b");
+        assert_eq!(expand_tilde("~user/x"), "~user/x");
+    }
+
     use super::*;
 
     struct Cpu;
