@@ -1,7 +1,7 @@
 use crate::editor::Editor;
 use crate::examples::EXAMPLES;
 use crate::gpu::Gpu;
-use crate::graph::{self, Graph};
+use crate::graph::{self, Graph, View};
 use crate::matrix::{
     Matrix, evaluate, graph_spec, load_input, output_path, parse_definitions, save_input,
     save_result, size_value,
@@ -69,6 +69,11 @@ pub struct MatrixUi {
     examples: Option<ListState>,
     /// Graph drawn next to the result when the definitions contain `graph NAME`.
     graph: Option<(String, Graph)>,
+    graph_view: View,
+    /// While set, arrows pan and +/- zoom the graph instead of editing.
+    graph_focus: bool,
+    /// Name of the loaded example or file, shown in the result title.
+    source: Option<String>,
     /// Input picture matching a large (image-sized) result, drawn next to it.
     before: Option<Matrix>,
     expr_help: bool,
@@ -130,6 +135,7 @@ pub const HELP: (&str, &[&str]) = (
         "graph NAME [grid W]  (in definitions) draw matrix NAME as a graph (grid: node i at column i % W)",
         "M = maze W H [seed]  random maze; W, H, seed: numbers or variables (W = 21)",
         "F3             expression help: all operations",
+        "F4             graph view: arrows pan, +/- zoom, 0 reset, F4/Esc back",
         "F1             this help",
         "Esc            back",
     ],
@@ -145,6 +151,9 @@ impl MatrixUi {
             status: None,
             examples: None,
             graph: None,
+            graph_view: View::default(),
+            graph_focus: false,
+            source: None,
             before: None,
             expr_help: false,
             defs_scroll: 0,
@@ -205,9 +214,15 @@ impl MatrixUi {
                     Graph::from_matrix(&m, grid).map_err(|e| format!("graph: {e:#}"))
                 });
             match built {
-                Ok(g) => self.graph = Some((name, g)),
+                Ok(g) => {
+                    self.graph = Some((name, g));
+                    self.graph_view = View::default();
+                }
                 Err(e) => self.status = Some(Err(e)),
             }
+        }
+        if self.graph.is_none() {
+            self.graph_focus = false;
         }
     }
 
@@ -229,12 +244,35 @@ impl MatrixUi {
                         let (defs, expr) = ex.load();
                         self.defs = Editor::new(&defs);
                         self.expr = Editor::new(&expr);
+                        self.source = Some(ex.title.to_string());
                         self.focus = Focus::Expr;
                         self.examples = None;
                         self.calculate(gpu);
                     }
                 }
                 _ => {}
+            }
+            return false;
+        }
+        if self.graph_focus {
+            match key.code {
+                KeyCode::Esc | KeyCode::F(4) => self.graph_focus = false,
+                KeyCode::Left => self.graph_view.pan(-0.5, 0.0),
+                KeyCode::Right => self.graph_view.pan(0.5, 0.0),
+                KeyCode::Up => self.graph_view.pan(0.0, 0.5),
+                KeyCode::Down => self.graph_view.pan(0.0, -0.5),
+                KeyCode::Char('+' | '=') | KeyCode::PageUp => self.graph_view.zoom_by(1.5),
+                KeyCode::Char('-' | '_') | KeyCode::PageDown => self.graph_view.zoom_by(1.0 / 1.5),
+                KeyCode::Char('0') | KeyCode::Home => self.graph_view = View::default(),
+                _ => {}
+            }
+            return false;
+        }
+        if key.code == KeyCode::F(4) && self.prompt.is_none() {
+            if self.graph.is_some() {
+                self.graph_focus = true;
+            } else {
+                self.status = Some(Err("No graph: add a `graph NAME` line and calculate".into()));
             }
             return false;
         }
@@ -360,6 +398,7 @@ impl MatrixUi {
                     self.expr = Editor::new(&e);
                 }
                 self.result = None;
+                self.source = Some(path.to_string());
                 format!("Loaded {path}")
             }),
         };
@@ -508,8 +547,21 @@ impl MatrixUi {
             };
             lines.insert(0, Line::styled(msg.as_str(), Style::new().fg(color)));
         }
-        let outer = Block::bordered().title(" Result ")
-            .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+E export maze zip  Ctrl+O open  F2: examples  F3: expr help  F1: help  Esc: back ");
+        let mode = if self.graph_focus {
+            " | graph view"
+        } else {
+            ""
+        };
+        let title = match &self.source {
+            Some(name) => format!(" Result: {name}{mode} "),
+            None => format!(" Result{mode} "),
+        };
+        let hint = if self.graph_focus {
+            " arrows: pan  +/- or PgUp/PgDn: zoom  0/Home: reset  F4/Esc: back to editing "
+        } else {
+            " Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+E export maze zip  Ctrl+O open  F2: examples  F3: expr help  F4: graph zoom  F1: help  Esc: back "
+        };
+        let outer = Block::bordered().title(title).title_bottom(hint);
         let inner = outer.inner(result);
         frame.render_widget(outer, result);
         if let (Some(before), Some(Ok(after))) = (&self.before, &self.result) {
@@ -574,7 +626,24 @@ impl MatrixUi {
                 }
                 _ => None,
             };
-            graph::draw(frame, area, &format!(" Graph {name} "), g, values);
+            let title = format!(
+                " Graph {name}  zoom {:.1}x{} ",
+                self.graph_view.zoom,
+                if self.graph_focus {
+                    ""
+                } else {
+                    "  (F4: zoom/pan)"
+                }
+            );
+            graph::draw(
+                frame,
+                area,
+                &title,
+                g,
+                values,
+                self.graph_view,
+                self.graph_focus,
+            );
         }
     }
 }
@@ -646,6 +715,38 @@ mod tests {
         ui.calculate(&gpu);
         let before = ui.before.expect("before picture");
         assert_eq!((before.rows, before.cols), (96, 96));
+    }
+
+    #[test]
+    fn graph_view_zooms_pans_and_draws_huge_graph() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::with_examples();
+        let key = |ui: &mut MatrixUi, code| ui.handle_key(KeyEvent::from(code), &gpu);
+        key(&mut ui, KeyCode::F(4));
+        assert!(!ui.graph_focus, "no graph yet");
+        let ex = EXAMPLES
+            .iter()
+            .position(|e| e.title.starts_with("Maze: A*"))
+            .unwrap();
+        ui.examples.as_mut().unwrap().select(Some(ex));
+        key(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.source.as_deref(), Some(EXAMPLES[ex].title));
+
+        key(&mut ui, KeyCode::F(4));
+        assert!(ui.graph_focus);
+        key(&mut ui, KeyCode::Char('+'));
+        key(&mut ui, KeyCode::Right);
+        assert!(ui.graph_view.zoom > 1.0 && ui.graph_view.cx > 0.0);
+        assert!(!key(&mut ui, KeyCode::Esc) && !ui.graph_focus);
+
+        for zoom in [1.0, 8.0] {
+            ui.graph_view.zoom = zoom;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|f| ui.draw(f, f.area())).unwrap();
+            let screen = format!("{}", terminal.backend());
+            assert!(screen.contains(EXAMPLES[ex].title) && screen.contains("Graph M"));
+        }
     }
 
     #[test]

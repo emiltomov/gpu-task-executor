@@ -14,8 +14,6 @@ use ratatui::{
 use std::collections::HashSet;
 
 const MAX_NODES: usize = 1000;
-/// Above this many nodes the picture drops circles and labels so edges stay readable.
-const DETAILED_NODES: usize = 60;
 const NODE_RADIUS: f64 = 0.06;
 
 /// Directed weighted graph read from an adjacency matrix (`m[i][j] != 0` is an edge i -> j).
@@ -25,6 +23,8 @@ pub struct Graph {
     pub pos: Vec<(f64, f64)>,
     /// Set for grid graphs (mazes): longest path and dead ends are highlighted.
     pub maze: Option<MazeInfo>,
+    /// Smallest distance between two nodes in the layout's unit box.
+    pub min_dist: f64,
 }
 
 pub struct MazeInfo {
@@ -56,20 +56,29 @@ impl Graph {
             None => layout(n, &edges),
         };
         let maze = grid.map(|_| maze_info(n, &edges));
+        let min_dist = min_distance(&pos);
         Ok(Self {
             n,
             edges,
             pos,
             maze,
+            min_dist,
         })
     }
+}
 
-    fn weighted(&self) -> bool {
-        self.edges.iter().any(|e| e.2 != 1.0)
+/// Smallest distance between two nodes (1 for fewer than two), used to size circles and labels.
+fn min_distance(pos: &[(f64, f64)]) -> f64 {
+    let mut best = f64::INFINITY;
+    for (i, a) in pos.iter().enumerate() {
+        for b in &pos[i + 1..] {
+            best = best.min(((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt());
+        }
     }
-
-    fn has_edge(&self, a: usize, b: usize) -> bool {
-        self.edges.iter().any(|e| e.0 == a && e.1 == b)
+    if best.is_finite() {
+        best.max(1e-3)
+    } else {
+        1.0
     }
 }
 
@@ -184,17 +193,71 @@ fn layout(n: usize, edges: &[(usize, usize, f32)]) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// Draws the graph; `values` (one per node) colors positive nodes green and prints the value.
-pub fn draw(frame: &mut Frame, area: Rect, title: &str, g: &Graph, values: Option<&[f32]>) {
-    let block = Block::bordered().title(title.to_string());
+/// Zoom and pan of the graph picture; `cx`/`cy` is the view center in the layout's unit box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    pub zoom: f64,
+    pub cx: f64,
+    pub cy: f64,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            cx: 0.0,
+            cy: 0.0,
+        }
+    }
+}
+
+impl View {
+    const MAX_ZOOM: f64 = 64.0;
+
+    pub fn zoom_by(&mut self, factor: f64) {
+        self.zoom = (self.zoom * factor).clamp(1.0, Self::MAX_ZOOM);
+        self.pan(0.0, 0.0);
+    }
+
+    /// Moves the view by a fraction of what is currently visible (positive `dy` = up).
+    pub fn pan(&mut self, dx: f64, dy: f64) {
+        let limit = 1.0 - 1.0 / self.zoom;
+        self.cx = (self.cx + dx / self.zoom * 0.5).clamp(-limit, limit);
+        self.cy = (self.cy + dy / self.zoom * 0.5).clamp(-limit, limit);
+    }
+}
+
+/// Draws the graph with circles and labels (`values`, one per node, color positive nodes and are
+/// printed); zoom in to read labels of big graphs.
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    g: &Graph,
+    values: Option<&[f32]>,
+    view: View,
+    focused: bool,
+) {
+    let border = if focused { Color::Cyan } else { Color::Reset };
+    let block = Block::bordered()
+        .title(title.to_string())
+        .border_style(Style::new().fg(border));
     let inner = block.inner(area);
     // Braille gives 2x4 dots per cell; widen the x range so circles stay round.
     let aspect = (inner.width.max(1) as f64 * 2.0) / (inner.height.max(1) as f64 * 4.0);
+    let (cx, cy) = (view.cx * aspect, view.cy);
+    let (hw, hh) = (aspect / view.zoom, 1.0 / view.zoom);
+    let radius = NODE_RADIUS.min(0.4 * g.min_dist * aspect.min(1.0));
+    // Labels need roughly 4 terminal columns per node to stay readable.
+    let columns_per_node = g.min_dist * view.zoom * inner.width as f64 / 2.0;
+    let labels = columns_per_node >= 4.0;
+    let weighted = g.edges.iter().any(|e| e.2 != 1.0);
+    let edge_set: HashSet<(usize, usize)> = g.edges.iter().map(|e| (e.0, e.1)).collect();
     let canvas = Canvas::default()
         .block(block)
         .marker(Marker::Braille)
-        .x_bounds([-aspect, aspect])
-        .y_bounds([-1.0, 1.0])
+        .x_bounds([cx - hw, cx + hw])
+        .y_bounds([cy - hh, cy + hh])
         .paint(|ctx| {
             let p = |i: usize| (g.pos[i].0 * aspect, g.pos[i].1);
             for &(a, b, w) in &g.edges {
@@ -217,10 +280,10 @@ pub fn draw(frame: &mut Frame, area: Rect, title: &str, g: &Graph, values: Optio
                         Color::DarkGray
                     },
                 });
-                if !g.has_edge(b, a) {
-                    arrowhead(ctx, (x1, y1), (x2, y2));
+                if !edge_set.contains(&(b, a)) {
+                    arrowhead(ctx, (x1, y1), (x2, y2), radius);
                 }
-                if g.weighted() {
+                if weighted && labels {
                     ctx.print(
                         (x1 + x2) / 2.0,
                         (y1 + y2) / 2.0,
@@ -228,50 +291,59 @@ pub fn draw(frame: &mut Frame, area: Rect, title: &str, g: &Graph, values: Optio
                     );
                 }
             }
-            if let Some(m) = &g.maze {
-                for &i in &m.dead_ends {
-                    let (x, y) = p(i);
-                    ctx.print(x, y, Span::styled("█", Style::new().fg(Color::Red)));
-                }
-            }
-            let detailed = g.n <= DETAILED_NODES;
+            let dead_end: HashSet<usize> = g
+                .maze
+                .as_ref()
+                .map(|m| m.dead_ends.iter().copied().collect())
+                .unwrap_or_default();
+            // Mazes keep green for the longest path; result highlights turn yellow.
+            let lit_color = if g.maze.is_some() {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
             for i in 0..g.n {
                 let (x, y) = p(i);
-                let lit = values.is_some_and(|v| v.get(i).is_some_and(|&x| x > 0.0));
-                // Mazes keep green for the longest path; result highlights turn yellow.
-                let lit_color = if g.maze.is_some() {
-                    Color::Yellow
-                } else {
-                    Color::Green
-                };
-                let color = if lit { lit_color } else { Color::Cyan };
-                if !detailed {
-                    if lit {
-                        ctx.print(x, y, Span::styled("█", Style::new().fg(color)));
-                    }
+                if (x - cx).abs() > hw + radius || (y - cy).abs() > hh + radius {
                     continue;
                 }
+                let lit = values.is_some_and(|v| v.get(i).is_some_and(|&x| x > 0.0));
+                let color = if lit {
+                    lit_color
+                } else if dead_end.contains(&i) {
+                    Color::Red
+                } else {
+                    Color::Cyan
+                };
                 ctx.draw(&Circle {
                     x,
                     y,
-                    radius: NODE_RADIUS,
+                    radius,
                     color,
                 });
-                let label = match values.and_then(|v| v.get(i)) {
-                    Some(v) => format!("{i}={}", fmt_num(*v)),
-                    None => i.to_string(),
-                };
-                ctx.print(x, y, Span::styled(label, Style::new().fg(color)));
+                if labels {
+                    let label = match values.and_then(|v| v.get(i)) {
+                        Some(v) => format!("{i}={}", fmt_num(*v)),
+                        None => i.to_string(),
+                    };
+                    ctx.print(x, y, Span::styled(label, Style::new().fg(color)));
+                }
             }
         });
     frame.render_widget(canvas, area);
 }
 
-fn arrowhead(ctx: &mut ratatui::widgets::canvas::Context, from: (f64, f64), to: (f64, f64)) {
+fn arrowhead(
+    ctx: &mut ratatui::widgets::canvas::Context,
+    from: (f64, f64),
+    to: (f64, f64),
+    radius: f64,
+) {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let d = (dx * dx + dy * dy).sqrt().max(1e-6);
     let (ux, uy) = (dx / d, dy / d);
-    let tip = (to.0 - ux * NODE_RADIUS, to.1 - uy * NODE_RADIUS);
+    let tip = (to.0 - ux * radius, to.1 - uy * radius);
+    let len = radius * 7.0 / 6.0;
     for sign in [-1.0, 1.0] {
         let a: f64 = 0.45 * sign;
         let (c, s) = (a.cos(), a.sin());
@@ -279,8 +351,8 @@ fn arrowhead(ctx: &mut ratatui::widgets::canvas::Context, from: (f64, f64), to: 
         ctx.draw(&Line {
             x1: tip.0,
             y1: tip.1,
-            x2: tip.0 + wx * 0.07,
-            y2: tip.1 + wy * 0.07,
+            x2: tip.0 + wx * len,
+            y2: tip.1 + wy * len,
             color: Color::Gray,
         });
     }
@@ -324,6 +396,22 @@ mod tests {
         assert_eq!(info.dead_ends, vec![0, 2, 3]);
         assert_eq!(info.longest.len(), 2);
         assert!(Graph::from_matrix(&m, None).unwrap().maze.is_none());
+    }
+
+    #[test]
+    fn view_zoom_and_pan_stay_inside_the_graph() {
+        let mut v = View::default();
+        v.pan(5.0, 5.0);
+        assert_eq!((v.cx, v.cy), (0.0, 0.0));
+        v.zoom_by(0.1);
+        assert_eq!(v.zoom, 1.0);
+        v.zoom_by(4.0);
+        v.pan(100.0, -100.0);
+        assert_eq!((v.cx, v.cy), (0.75, -0.75));
+        v.zoom_by(0.5);
+        assert!(v.cx <= 0.5 && v.cy >= -0.5);
+        v.zoom_by(1e6);
+        assert_eq!(v.zoom, View::MAX_ZOOM);
     }
 
     #[test]
