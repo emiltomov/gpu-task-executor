@@ -1,0 +1,4 @@
+# A* shortest path from the top-left cell (0) to the bottom-right cell (W * H - 1).
+# The 4th argument is the grid width, enabling the Manhattan-distance heuristic.
+# Path cells are highlighted in the graph.
+astar(M, 0, W * H - 1, W)

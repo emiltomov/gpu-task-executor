@@ -1,2 +1,3 @@
 # Darken-light relighting: lift shadows with 0.5*I + 0.4 (compresses contrast).
+# back: 2 * I - 0.8
 0.5 * I + 0.4

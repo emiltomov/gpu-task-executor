@@ -1,0 +1,3 @@
+# Rotate 90 degrees clockwise: transpose, then mirror the columns. Ctrl+N rotates again.
+# back: flip(cols(I)) * I'
+I' * flip(rows(I))

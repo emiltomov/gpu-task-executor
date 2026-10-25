@@ -1,0 +1,3 @@
+# Scale up to 2x the size (bilinear). Ctrl+P scales the result back down.
+# back: resize(I, 0.5 * rows(I), 0.5 * cols(I))
+resize(I, 2 * rows(I), 2 * cols(I))

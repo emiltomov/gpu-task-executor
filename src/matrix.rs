@@ -124,6 +124,17 @@ pub fn parse_definitions(text: &str) -> Result<HashMap<String, Matrix>> {
     Ok(vars)
 }
 
+/// Expands a leading `~` to the home directory (the OS does not do it for us).
+pub fn expand_tilde(path: &str) -> String {
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            format!("{home}{rest}")
+        }
+        _ => path.to_string(),
+    }
+}
+
 fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Result<()> {
     for (n, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -134,7 +145,8 @@ fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Res
             continue;
         }
         if let Some(path) = line.strip_prefix("include ") {
-            let path = path.trim();
+            let path = expand_tilde(path.trim());
+            let path = path.as_str();
             if depth >= MAX_INCLUDE_DEPTH {
                 bail!("line {}: includes nested too deeply", n + 1);
             }
@@ -151,14 +163,41 @@ fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Res
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             bail!("line {}: bad name '{name}'", n + 1);
         }
-        let m = match body.trim().strip_prefix("image ") {
-            Some(spec) => load_image(spec.trim()),
-            None => Matrix::parse(body),
+        let body = body.trim();
+        let m = if let Some(spec) = body.strip_prefix("image ") {
+            load_image(spec.trim())
+        } else if let Some(spec) = body.strip_prefix("maze ") {
+            parse_maze(spec, vars)
+        } else {
+            Matrix::parse(body)
         }
         .with_context(|| format!("line {}", n + 1))?;
         vars.insert(name.to_string(), m);
     }
     Ok(())
+}
+
+/// `maze W H [seed]`: adjacency matrix of a random W x H grid maze; each value is a number or
+/// the name of a 1x1 matrix defined earlier (e.g. `W = 21`).
+fn parse_maze(spec: &str, vars: &HashMap<String, Matrix>) -> Result<Matrix> {
+    let nums = spec
+        .split_whitespace()
+        .map(|v| size_value(v, vars).with_context(|| format!("bad maze value '{v}'")))
+        .collect::<Result<Vec<_>>>()?;
+    match nums[..] {
+        [w, h] => crate::search::maze(w, h, 1),
+        [w, h, seed] => crate::search::maze(w, h, seed as u64),
+        _ => bail!("expected maze W H [seed]"),
+    }
+}
+
+/// Whole number from a literal or a 1x1 variable (used for maze and graph sizes).
+pub fn size_value(token: &str, vars: &HashMap<String, Matrix>) -> Option<usize> {
+    let v = match token.parse::<f32>() {
+        Ok(v) => v,
+        Err(_) => *vars.get(token).filter(|m| m.is_scalar())?.data.first()?,
+    };
+    (v >= 0.0 && v.fract() == 0.0).then_some(v as usize)
 }
 
 const MAX_IMAGE_SIDE: u32 = 128;
@@ -169,7 +208,7 @@ fn load_image(spec: &str) -> Result<Matrix> {
     let img = if spec == "builtin:earth" {
         image::load_from_memory(EARTH_PNG)?
     } else {
-        image::open(spec).with_context(|| format!("cannot read image '{spec}'"))?
+        image::open(expand_tilde(spec)).with_context(|| format!("cannot read image '{spec}'"))?
     };
     let img = if img.width().max(img.height()) > MAX_IMAGE_SIDE {
         img.thumbnail(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE)
@@ -184,12 +223,52 @@ fn load_image(spec: &str) -> Result<Matrix> {
     })
 }
 
-/// Matrix name from the first `graph NAME` line of the definitions, if any.
-pub fn graph_name(defs: &str) -> Option<String> {
-    defs.lines()
-        .find_map(|l| l.trim().strip_prefix("graph "))
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
+/// Size of the main matrix of some definitions: `I`, else the `graph` matrix.
+pub fn main_size(defs: &str) -> Option<(usize, usize)> {
+    let vars = parse_definitions(defs).ok()?;
+    let m = match vars.get("I") {
+        Some(m) => m,
+        None => vars.get(&graph_spec(defs)?.0)?,
+    };
+    Some((m.rows, m.cols))
+}
+
+/// Replaces whole-number literals equal to the old rows/columns with the new ones, so an
+/// expression written for one matrix (e.g. `flip(96)`) fits a newly opened matrix.
+pub fn remap_sizes(expr: &str, old: (usize, usize), new: (usize, usize)) -> String {
+    let (mut out, mut word) = (String::new(), String::new());
+    let flush = |out: &mut String, word: &mut String| {
+        let is_num = !word.is_empty() && word.chars().all(|c| c.is_ascii_digit());
+        match word.parse::<usize>() {
+            Ok(n) if is_num && n == old.0 => out.push_str(&new.0.to_string()),
+            Ok(n) if is_num && n == old.1 => out.push_str(&new.1.to_string()),
+            _ => out.push_str(word),
+        }
+        word.clear();
+    };
+    for c in expr.chars() {
+        if c.is_alphanumeric() || c == '_' || c == '.' {
+            word.push(c);
+        } else {
+            flush(&mut out, &mut word);
+            out.push(c);
+        }
+    }
+    flush(&mut out, &mut word);
+    out
+}
+
+/// Matrix name and optional grid width (a number or variable name, see [`size_value`]) from the
+/// first `graph NAME [grid WIDTH]` line of the definitions, if any.
+pub fn graph_spec(defs: &str) -> Option<(String, Option<String>)> {
+    let rest = defs.lines().find_map(|l| l.trim().strip_prefix("graph "))?;
+    let mut words = rest.split_whitespace();
+    let name = words.next()?.to_string();
+    let grid = match (words.next(), words.next()) {
+        (Some("grid"), Some(w)) => Some(w.to_string()),
+        _ => None,
+    };
+    Some((name, grid))
 }
 
 /// Path from the first `output path` line of the definitions, if any.
@@ -198,12 +277,26 @@ pub fn output_path(defs: &str) -> Option<String> {
         .find_map(|l| l.trim().strip_prefix("output "))
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
+        .map(|p| expand_tilde(&p))
 }
 
 /// Saves the definitions plus the expression (as a `# expr:` comment, so the file stays includable).
 pub fn save_input(path: &str, defs: &str, expr: &str) -> Result<()> {
     let text = format!("{}\n{EXPR_PREFIX} {expr}\n", defs.trim_end());
-    std::fs::write(path, text).with_context(|| format!("cannot write '{path}'"))
+    std::fs::write(expand_tilde(path), text).with_context(|| format!("cannot write '{path}'"))
+}
+
+/// Saves a matrix as a grayscale PNG (values clamped to 0..1); small matrices are enlarged so
+/// every cell is visible.
+pub fn save_png(path: &str, m: &Matrix) -> Result<()> {
+    let scale = (256 / m.rows.max(m.cols).max(1)).max(1);
+    let (w, h) = (m.cols * scale, m.rows * scale);
+    let img = image::GrayImage::from_fn(w as u32, h as u32, |x, y| {
+        let v = m.data[(y as usize / scale) * m.cols + x as usize / scale];
+        image::Luma([(v.clamp(0.0, 1.0) * 255.0).round() as u8])
+    });
+    img.save_with_format(expand_tilde(path), image::ImageFormat::Png)
+        .with_context(|| format!("cannot write '{path}'"))
 }
 
 pub fn result_text(m: &Matrix) -> String {
@@ -212,13 +305,44 @@ pub fn result_text(m: &Matrix) -> String {
 
 /// Saves a result as `result = [..]`, so the file can be opened or included later.
 pub fn save_result(path: &str, m: &Matrix) -> Result<()> {
-    std::fs::write(path, result_text(m)).with_context(|| format!("cannot write '{path}'"))
+    std::fs::write(expand_tilde(path), result_text(m))
+        .with_context(|| format!("cannot write '{path}'"))
 }
 
-/// Returns `(definitions, expression)` from a file written by [`save_input`] (or any definitions file).
+/// Returns `(definitions, expression)` from a file written by [`save_input`] (or any definitions
+/// file). A maze `.zip` (see Ctrl+E) yields its `input.txt`; an image file yields `I = image PATH`.
 pub fn load_input(path: &str) -> Result<(String, Option<String>)> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read '{path}'"))?;
-    Ok(split_input(&text))
+    let real = expand_tilde(path);
+    let ext = std::path::Path::new(&real)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "zip" => {
+            use std::io::Read;
+            let file =
+                std::fs::File::open(&real).with_context(|| format!("cannot read '{path}'"))?;
+            let mut zip = zip::ZipArchive::new(file)
+                .with_context(|| format!("'{path}' is not a valid zip"))?;
+            let mut text = String::new();
+            zip.by_name("input.txt")
+                .with_context(|| format!("'{path}' has no input.txt (not a maze export)"))?
+                .read_to_string(&mut text)?;
+            Ok(split_input(&text))
+        }
+        "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" | "tif" | "tiff" => {
+            if !std::path::Path::new(&real).is_file() {
+                bail!("cannot read '{path}'");
+            }
+            Ok((format!("I = image {path}\n"), None))
+        }
+        _ => {
+            let text =
+                std::fs::read_to_string(&real).with_context(|| format!("cannot read '{path}'"))?;
+            Ok(split_input(&text))
+        }
+    }
 }
 
 /// Joins the expression lines, skipping blank lines and `#` comments.
@@ -228,6 +352,13 @@ pub fn clean_expression(text: &str) -> String {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The inverse expression declared as a `# back: ...` comment line in an expression file.
+pub fn back_expression(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("# back:"))
+        .map(|e| e.trim().to_string())
 }
 
 /// Separates the `# expr:` line from the definitions.
@@ -406,6 +537,62 @@ fn eval(e: &Expr, vars: &HashMap<String, Matrix>, be: &dyn Backend) -> Result<Ma
                 trace(&m)
             })
         }
+        Expr::Call(name, args) if name == "rows" || name == "cols" => {
+            if args.len() != 1 {
+                bail!("{name}() takes 1 argument");
+            }
+            let m = eval(&args[0], vars, be)?;
+            Matrix::scalar(if name == "rows" { m.rows } else { m.cols } as f32)
+        }
+        Expr::Call(name, args) if name == "resize" => {
+            if args.len() != 3 {
+                bail!("resize() takes 3 arguments: image, rows, columns");
+            }
+            let img = eval(&args[0], vars, be)?;
+            let mut dims = [0usize; 2];
+            for (d, a) in dims.iter_mut().zip(&args[1..]) {
+                let v = eval(a, vars, be)?;
+                let size = v.data.first().map(|x| x.round());
+                if !v.is_scalar() || !size.is_some_and(|s| (1.0..=2048.0).contains(&s)) {
+                    bail!("resize() sizes must be numbers between 1 and 2048");
+                }
+                *d = size.unwrap_or(1.0) as usize;
+            }
+            resize(&img, dims[0], dims[1])
+        }
+        Expr::Call(name, args) if name == "raycast" => {
+            if args.len() != 2 {
+                bail!("raycast() takes 2 arguments: image, camera angle in degrees");
+            }
+            let (img, angle) = (eval(&args[0], vars, be)?, eval(&args[1], vars, be)?);
+            if !angle.is_scalar() {
+                bail!("raycast() angle must be a number");
+            }
+            raycast(&img, angle.data[0])
+        }
+        Expr::Call(name, args) if name == "astar" || name == "bfs" => {
+            let want = if name == "astar" { 3..=4 } else { 2..=2 };
+            if !want.contains(&args.len()) {
+                bail!(
+                    "{name}() takes {} arguments",
+                    if name == "astar" { "3-4" } else { "2" }
+                );
+            }
+            let m = eval(&args[0], vars, be)?;
+            let mut nums = Vec::new();
+            for a in &args[1..] {
+                let v = eval(a, vars, be)?;
+                if !v.is_scalar() || v.data[0].fract() != 0.0 || v.data[0] < 0.0 {
+                    bail!("{name}() node numbers and width must be whole numbers");
+                }
+                nums.push(v.data[0] as usize);
+            }
+            if name == "bfs" {
+                crate::search::bfs(&m, nums[0])?
+            } else {
+                crate::search::astar(&m, nums[0], nums[1], nums.get(2).copied())?
+            }
+        }
         Expr::Call(name, args) => {
             let mut values = Vec::new();
             for a in args {
@@ -509,6 +696,83 @@ fn clean(v: f32) -> f32 {
     if v.abs() < 1e-6 { 0.0 } else { v }
 }
 
+/// Scales an image to `rows` x `cols`: bilinear taps, several per output pixel when shrinking
+/// (so shrinking averages instead of dropping pixels).
+fn resize(img: &Matrix, rows: usize, cols: usize) -> Matrix {
+    let (sy, sx) = (img.rows as f32 / rows as f32, img.cols as f32 / cols as f32);
+    let (ty, tx) = (sy.ceil().max(1.0) as usize, sx.ceil().max(1.0) as usize);
+    let at = |r: f32, k: f32| {
+        let (r, k) = (
+            r.clamp(0.0, img.rows as f32 - 1.0),
+            k.clamp(0.0, img.cols as f32 - 1.0),
+        );
+        let (r0, k0) = (r.floor() as usize, k.floor() as usize);
+        let (r1, k1) = ((r0 + 1).min(img.rows - 1), (k0 + 1).min(img.cols - 1));
+        let (fr, fk) = (r - r0 as f32, k - k0 as f32);
+        let p = |r: usize, k: usize| img.data[r * img.cols + k];
+        p(r0, k0) * (1.0 - fr) * (1.0 - fk)
+            + p(r0, k1) * (1.0 - fr) * fk
+            + p(r1, k0) * fr * (1.0 - fk)
+            + p(r1, k1) * fr * fk
+    };
+    let mut out = Matrix::filled(rows, cols, 0.0);
+    for r in 0..rows {
+        for k in 0..cols {
+            let mut sum = 0.0;
+            for i in 0..ty {
+                for j in 0..tx {
+                    let y = (r as f32 + (i as f32 + 0.5) / ty as f32) * sy - 0.5;
+                    let x = (k as f32 + (j as f32 + 0.5) / tx as f32) * sx - 0.5;
+                    sum += at(y, x);
+                }
+            }
+            out.data[r * cols + k] = sum / (ty * tx) as f32;
+        }
+    }
+    out
+}
+
+/// Casts one ray per output pixel from a camera 3 units in front of the image plane (spanning
+/// -1..1 in x and y), orbited by `deg` degrees around the y axis. The ray's hit point is sampled
+/// bilinearly from `img`; rays that miss the plane give 0 (black). At 0 degrees the result is `img`.
+fn raycast(img: &Matrix, deg: f32) -> Matrix {
+    const DIST: f32 = 3.0;
+    let (s, c) = sin_cos_deg(deg);
+    let (rows, cols) = (img.rows, img.cols);
+    let at = |r: isize, k: isize| {
+        if r < 0 || k < 0 || r >= rows as isize || k >= cols as isize {
+            0.0
+        } else {
+            img.data[r as usize * cols + k as usize]
+        }
+    };
+    let mut out = Matrix::filled(rows, cols, 0.0);
+    for r in 0..rows {
+        for k in 0..cols {
+            let u = (k as f32 + 0.5) / cols as f32 * 2.0 - 1.0;
+            let v = (r as f32 + 0.5) / rows as f32 * 2.0 - 1.0;
+            let (ox, oz) = (DIST * s, DIST * c);
+            let (dx, dz) = (u * c - DIST * s, -u * s - DIST * c);
+            if dz >= 0.0 {
+                continue;
+            }
+            let t = -oz / dz;
+            let (x, y) = (
+                (ox + t * dx + 1.0) / 2.0 * cols as f32 - 0.5,
+                (v * t + 1.0) / 2.0 * rows as f32 - 0.5,
+            );
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let (x0, y0) = (x0 as isize, y0 as isize);
+            out.data[r * cols + k] = at(y0, x0) * (1.0 - fx) * (1.0 - fy)
+                + at(y0, x0 + 1) * fx * (1.0 - fy)
+                + at(y0 + 1, x0) * (1.0 - fx) * fy
+                + at(y0 + 1, x0 + 1) * fx * fy;
+        }
+    }
+    out
+}
+
 fn sin_cos_deg(deg: f32) -> (f32, f32) {
     let (s, c) = deg.to_radians().sin_cos();
     (clean(s), clean(c))
@@ -532,6 +796,16 @@ fn transformation(name: &str, a: &[f32]) -> Result<Matrix> {
                 bail!("identity() needs a size between 1 and 1024");
             }
             square(n as usize, |r, c| if r == c { 1.0 } else { 0.0 })
+        }
+        // Exchange matrix: `flip(n) * I` mirrors the rows, `I * flip(n)` the columns.
+        "flip" => {
+            argc(1)?;
+            let n = a[0];
+            if n.fract() != 0.0 || !(1.0..=1024.0).contains(&n) {
+                bail!("flip() needs a size between 1 and 1024");
+            }
+            let n = n as usize;
+            square(n, |r, c| if r + c + 1 == n { 1.0 } else { 0.0 })
         }
         "ones" => {
             argc(2)?;
@@ -609,7 +883,15 @@ fn transformation(name: &str, a: &[f32]) -> Result<Matrix> {
 
 /// Evaluates e.g. `(A + B) * C'` against the definitions, composing operations.
 pub fn evaluate(defs: &str, expr: &str, be: &dyn Backend) -> Result<Matrix> {
-    let vars = parse_definitions(defs)?;
+    evaluate_vars(&parse_definitions(defs)?, expr, be)
+}
+
+/// Like [`evaluate`], with the matrices already parsed (so callers can override some).
+pub fn evaluate_vars(
+    vars: &HashMap<String, Matrix>,
+    expr: &str,
+    be: &dyn Backend,
+) -> Result<Matrix> {
     let mut p = Parser {
         toks: tokenize(expr)?,
         pos: 0,
@@ -618,7 +900,7 @@ pub fn evaluate(defs: &str, expr: &str, be: &dyn Backend) -> Result<Matrix> {
     if p.pos < p.toks.len() {
         bail!("unexpected trailing input");
     }
-    eval(&e, &vars, be)
+    eval(&e, vars, be)
 }
 
 impl Backend for Gpu {
@@ -766,6 +1048,108 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rows_cols_adapt_expressions_to_any_image_size() {
+        let mut vars = HashMap::new();
+        vars.insert("I".to_string(), Matrix::filled(6, 10, 0.5));
+        let eval = |e: &str| evaluate_vars(&vars, e, &Cpu).unwrap();
+        let up = eval("resize(I, 2 * rows(I), 2 * cols(I))");
+        assert_eq!((up.rows, up.cols), (12, 20));
+        let rot = eval("I' * flip(rows(I))");
+        assert_eq!((rot.rows, rot.cols), (10, 6));
+        let back = evaluate_vars(
+            &HashMap::from([("I".to_string(), rot)]),
+            "flip(cols(I)) * I'",
+            &Cpu,
+        )
+        .unwrap();
+        assert_eq!((back.rows, back.cols), (6, 10));
+    }
+
+    #[test]
+    fn resize_and_flip() {
+        let img = Matrix {
+            rows: 2,
+            cols: 2,
+            data: vec![0.0, 1.0, 1.0, 0.0],
+        };
+        let up = super::resize(&img, 4, 4);
+        assert_eq!((up.rows, up.cols), (4, 4));
+        assert!(up.data.iter().all(|v| (0.0..=1.0).contains(v)));
+        let down = super::resize(&up, 1, 1);
+        assert!((down.data[0] - 0.5).abs() < 1e-5);
+        let same = super::resize(&img, 2, 2);
+        assert_eq!(same.data, img.data);
+        let m = evaluate("I = [1 2; 3 4]", "flip(2) * I * flip(2)", &Cpu).unwrap();
+        assert_eq!(m.data, vec![4.0, 3.0, 2.0, 1.0]);
+        let r = evaluate("I = [1 2; 3 4]", "I' * flip(2)", &Cpu).unwrap();
+        assert_eq!(r.data, vec![3.0, 1.0, 4.0, 2.0]);
+    }
+
+    #[test]
+    fn raycast_is_identity_at_zero_and_skews_otherwise() {
+        let img = Matrix {
+            rows: 8,
+            cols: 8,
+            data: (0..64).map(|i| (i % 8) as f32 / 8.0 + 0.1).collect(),
+        };
+        let same = super::raycast(&img, 0.0);
+        assert!(
+            same.data
+                .iter()
+                .zip(&img.data)
+                .all(|(a, b)| (a - b).abs() < 1e-4)
+        );
+        let turned = super::raycast(&img, 50.0);
+        assert!(
+            turned.data.iter().any(|&v| v == 0.0),
+            "rays that miss are black"
+        );
+        assert!(
+            turned
+                .data
+                .iter()
+                .zip(&img.data)
+                .any(|(a, b)| (a - b).abs() > 0.05)
+        );
+    }
+
+    #[test]
+    fn png_export_scales_small_matrices() {
+        let m = Matrix {
+            rows: 2,
+            cols: 4,
+            data: vec![0.0, 1.0, 0.5, 2.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let p = std::env::temp_dir().join(format!("gtu-{}.png", std::process::id()));
+        super::save_png(p.to_str().unwrap(), &m).unwrap();
+        let img = image::open(&p).unwrap().to_luma8();
+        std::fs::remove_file(&p).ok();
+        assert_eq!(img.dimensions(), (256, 128));
+        assert_eq!(img.get_pixel(0, 0).0[0], 0);
+        assert_eq!(img.get_pixel(64, 0).0[0], 255);
+        assert_eq!(img.get_pixel(255, 0).0[0], 255);
+    }
+
+    use super::expand_tilde;
+
+    #[test]
+    fn remap_sizes_replaces_old_dimensions() {
+        assert_eq!(
+            remap_sizes("resize(I, 96, 40) + 0.96 * flip(96)", (96, 40), (123, 23)),
+            "resize(I, 123, 23) + 0.96 * flip(123)"
+        );
+        assert_eq!(main_size("I = [1 2 3; 4 5 6]"), Some((2, 3)));
+    }
+
+    #[test]
+    fn tilde_expands_to_home() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(expand_tilde("~/a.zip"), format!("{home}/a.zip"));
+        assert_eq!(expand_tilde("a/~b"), "a/~b");
+        assert_eq!(expand_tilde("~user/x"), "~user/x");
+    }
+
     use super::*;
 
     struct Cpu;
@@ -932,8 +1316,20 @@ mod tests {
 
     #[test]
     fn graph_directive_and_scalar_broadcast() {
-        assert_eq!(graph_name("A = [1]\ngraph A\n"), Some("A".into()));
-        assert_eq!(graph_name("A = [1]"), None);
+        assert_eq!(graph_spec("A = [1]\ngraph A\n"), Some(("A".into(), None)));
+        assert_eq!(
+            graph_spec("graph M grid W"),
+            Some(("M".into(), Some("W".into())))
+        );
+        let vars = parse_definitions("W = 4\nH = 3\nM = maze W H 2").unwrap();
+        assert_eq!(vars["M"].rows, 12);
+        assert_eq!(
+            (size_value("W", &vars), size_value("5", &vars)),
+            (Some(4), Some(5))
+        );
+        assert_eq!(size_value("M", &vars), None);
+        assert!(parse_definitions("M = maze X 3").is_err());
+        assert_eq!(graph_spec("A = [1]"), None);
         let r = evaluate("A = [1 2; 3 4]", "A - 1 + ones(2, 2)", &Cpu).unwrap();
         assert_eq!(r.data, vec![1.0, 2.0, 3.0, 4.0]);
     }
@@ -954,6 +1350,7 @@ mod tests {
         for (dir, input) in [
             ("markov", "chain"),
             ("graph", "graph"),
+            ("maze", "maze"),
             ("lighting", "scene"),
         ] {
             for entry in std::fs::read_dir(root.join(dir)).unwrap() {

@@ -1,0 +1,3 @@
+# Discover the whole maze from cell 0: every cell gets its distance + 1
+# (all 504 cells are lit, none unreachable).
+bfs(M, 0)

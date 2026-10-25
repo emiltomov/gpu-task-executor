@@ -1,0 +1,3 @@
+# Sharpen (unsharp mask): add back the detail the blur removed, I + (I - blur(I)).
+# back: smooth(rows(I)) * I * smooth(cols(I))'
+2 * I - smooth(rows(I)) * I * smooth(cols(I))'
