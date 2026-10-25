@@ -73,6 +73,8 @@ pub struct MatrixUi {
     expr_help: bool,
     /// First visible line of the definitions editor.
     defs_scroll: usize,
+    /// Scroll position (row, column) of the numeric result.
+    result_scroll: (usize, usize),
     focus: Focus,
     result: Option<Result<Matrix, String>>,
 }
@@ -111,6 +113,7 @@ pub const HELP: (&str, &[&str]) = (
         "Output:   output path/to/result.txt  (definitions line; the result",
         "          is written there on every calculation)",
         "Expr:     operators and functions: press F3",
+        "PgUp/PgDn, Ctrl+arrows  scroll a large result",
         "Tab            switch definitions / expression",
         "Enter          calculate (in expression), F5 anywhere",
         "Arrows, Home/End, Shift  move / select",
@@ -138,6 +141,7 @@ impl MatrixUi {
             before: None,
             expr_help: false,
             defs_scroll: 0,
+            result_scroll: (0, 0),
             focus: Focus::Expr,
             result: None,
         }
@@ -162,6 +166,7 @@ impl MatrixUi {
 
     fn calculate(&mut self, gpu: &Gpu) {
         self.status = None;
+        self.result_scroll = (0, 0);
         self.result =
             Some(evaluate(&self.defs.text(), &self.expr.text(), gpu).map_err(|e| format!("{e:#}")));
         if let (Some(Ok(m)), Some(path)) = (&self.result, output_path(&self.defs.text())) {
@@ -224,6 +229,27 @@ impl MatrixUi {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let multiline = self.prompt.is_none() && self.focus == Focus::Defs;
+        if self.prompt.is_none() {
+            let (row, col) = &mut self.result_scroll;
+            match key.code {
+                KeyCode::PageUp => *row = row.saturating_sub(10),
+                KeyCode::PageDown => *row += 10,
+                KeyCode::Up if ctrl => *row = row.saturating_sub(1),
+                KeyCode::Down if ctrl => *row += 1,
+                KeyCode::Left if ctrl => *col = col.saturating_sub(4),
+                KeyCode::Right if ctrl => *col += 4,
+                _ => {}
+            }
+            if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+                || (ctrl
+                    && matches!(
+                        key.code,
+                        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                    ))
+            {
+                return false;
+            }
+        }
         if ctrl {
             if let KeyCode::Char(c) = key.code {
                 match c.to_ascii_lowercase() {
@@ -476,7 +502,34 @@ impl MatrixUi {
         } else {
             (inner, None)
         };
-        frame.render_widget(Paragraph::new(lines).style(style), text_area);
+        let max_row = lines.len().saturating_sub(text_area.height as usize);
+        let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+        let max_col = widest.saturating_sub(text_area.width as usize);
+        self.result_scroll = (
+            self.result_scroll.0.min(max_row),
+            self.result_scroll.1.min(max_col),
+        );
+        if max_row > 0 || max_col > 0 {
+            let first = self.result_scroll.0 + 1;
+            let last = (self.result_scroll.0 + text_area.height as usize).min(lines.len());
+            let info = format!(
+                " lines {first}-{last}/{} (PgUp/PgDn, Ctrl+arrows) ",
+                lines.len()
+            );
+            let top = Rect::new(result.x + 1, result.y, result.width.saturating_sub(2), 1);
+            frame.render_widget(
+                Paragraph::new(info)
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .style(Style::new().fg(Color::Cyan)),
+                top,
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(style)
+                .scroll((self.result_scroll.0 as u16, self.result_scroll.1 as u16)),
+            text_area,
+        );
         if let (Some(area), Some((name, g))) = (graph_area, &self.graph) {
             let values = match &self.result {
                 Some(Ok(m)) if m.data.len() == g.n && (m.rows == 1 || m.cols == 1) => {
@@ -565,6 +618,20 @@ mod tests {
         assert_eq!(scroll_offset(3, 4, 5, 20), 3);
         assert_eq!(scroll_offset(3, 1, 5, 20), 1);
         assert_eq!(scroll_offset(9, 4, 5, 6), 1);
+    }
+
+    #[test]
+    fn page_keys_scroll_result_without_editing() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::new();
+        let text = ui.expr.text();
+        ui.handle_key(KeyEvent::from(KeyCode::PageDown), &gpu);
+        assert_eq!(ui.result_scroll.0, 10);
+        ui.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL), &gpu);
+        assert_eq!(ui.result_scroll.1, 4);
+        ui.handle_key(KeyEvent::from(KeyCode::PageUp), &gpu);
+        assert_eq!(ui.result_scroll.0, 0);
+        assert_eq!(ui.expr.text(), text);
     }
 
     #[test]
