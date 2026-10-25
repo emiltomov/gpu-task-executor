@@ -392,17 +392,37 @@ fn eval(e: &Expr, vars: &HashMap<String, Matrix>, be: &dyn Backend) -> Result<Ma
             .get(n)
             .with_context(|| format!("unknown matrix '{n}'"))?
             .clone(),
+        Expr::Call(name, args) if name == "det" || name == "trace" => {
+            if args.len() != 1 {
+                bail!("{name}() takes 1 argument");
+            }
+            let m = eval(&args[0], vars, be)?;
+            if m.rows != m.cols {
+                bail!("{name}() needs a square matrix, got {}x{}", m.rows, m.cols);
+            }
+            Matrix::scalar(if name == "det" {
+                determinant(&m)
+            } else {
+                trace(&m)
+            })
+        }
         Expr::Call(name, args) => {
-            let values = args
-                .iter()
-                .map(|a| {
-                    let m = eval(a, vars, be)?;
-                    if m.rows != 1 || m.cols != 1 {
-                        bail!("arguments of {name}() must be numbers");
-                    }
-                    Ok(m.data[0])
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let mut values = Vec::new();
+            for a in args {
+                let m = eval(a, vars, be)?;
+                // A single vector argument expands into several, e.g. scale(v).
+                if args.len() == 1 && (m.rows == 1 || m.cols == 1) {
+                    values.extend(&m.data);
+                } else if m.rows == 1 && m.cols == 1 {
+                    values.push(m.data[0]);
+                } else {
+                    bail!(
+                        "arguments of {name}() must be numbers, got {}x{} (reduce with det() or trace())",
+                        m.rows,
+                        m.cols
+                    );
+                }
+            }
             transformation(name, &values)?
         }
         Expr::Neg(x) => be.binary(Op::Mul, &eval(x, vars, be)?, &Matrix::scalar(-1.0))?,
@@ -433,6 +453,39 @@ impl Matrix {
             data: vec![v; rows * cols],
         }
     }
+}
+
+fn trace(m: &Matrix) -> f32 {
+    (0..m.rows).map(|i| m.data[i * m.cols + i]).sum()
+}
+
+/// Determinant by Gaussian elimination with partial pivoting.
+fn determinant(m: &Matrix) -> f32 {
+    let n = m.rows;
+    let mut a: Vec<f64> = m.data.iter().map(|&v| v as f64).collect();
+    let mut det = 1.0;
+    for c in 0..n {
+        let p = (c..n)
+            .max_by(|&x, &y| a[x * n + c].abs().total_cmp(&a[y * n + c].abs()))
+            .unwrap();
+        if a[p * n + c] == 0.0 {
+            return 0.0;
+        }
+        if p != c {
+            for k in 0..n {
+                a.swap(p * n + k, c * n + k);
+            }
+            det = -det;
+        }
+        det *= a[c * n + c];
+        for r in c + 1..n {
+            let f = a[r * n + c] / a[c * n + c];
+            for k in c..n {
+                a[r * n + k] -= f * a[c * n + k];
+            }
+        }
+    }
+    clean(det as f32)
 }
 
 fn square(n: usize, f: impl Fn(usize, usize) -> f32) -> Matrix {
@@ -857,6 +910,24 @@ mod tests {
         assert!(evaluate(defs, "rot(P)", &Cpu).is_err());
         assert!(evaluate(defs, "nope(1)", &Cpu).is_err());
         assert!(evaluate(defs, "rot(30", &Cpu).is_err());
+    }
+
+    #[test]
+    fn expressions_compose_inside_function_arguments() {
+        let defs = "A = [30]\nB = [15]\nM = [2 0; 0 3]\nv = [1 2 3]";
+        let a = evaluate(defs, "rot(A * B + A')", &Cpu).unwrap();
+        let b = evaluate(defs, "rot(480)", &Cpu).unwrap();
+        assert_eq!(a.data.len(), 4);
+        assert!((a.data[0] - b.data[0]).abs() < 1e-3);
+        assert_eq!(evaluate(defs, "det(M)", &Cpu).unwrap().data, vec![6.0]);
+        assert_eq!(
+            evaluate(defs, "trace(M * M')", &Cpu).unwrap().data,
+            vec![13.0]
+        );
+        let r = evaluate(defs, "rot(det(M) * 15)", &Cpu).unwrap();
+        assert!(r.data[0].abs() < 1e-5 && (r.data[1] + 1.0).abs() < 1e-5);
+        assert_eq!(evaluate(defs, "scale(v)", &Cpu).unwrap().rows, 3);
+        assert!(evaluate(defs, "rot(M)", &Cpu).is_err());
     }
 
     #[test]

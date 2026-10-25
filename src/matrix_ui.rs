@@ -92,6 +92,9 @@ pub const EXPR_HELP: (&str, &[&str]) = (
         "  reflect(a)             mirror across the line at angle a",
         "  proj(a)                project onto the line at angle a",
         "  identity(n)            n x n identity",
+        "  det(M)  trace(M)       matrix -> number, usable inside any argument",
+        "Arguments may be any expression giving a number (1x1), or one vector:",
+        "  rot(det(A * B) + 10)   scale(v)",
         "  ones(r, c)             matrix of ones",
         "  smooth(n)              n x n blur kernel (1 2 1)/4",
         "e.g.  rot(90) * v     rotz(30) * scale(1, 2, 3) * P",
@@ -416,7 +419,7 @@ impl MatrixUi {
             )
             .block(
                 Block::bordered()
-                    .title(" Expr: + - * ' ( )  rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth  (F3: help) ")
+                    .title(" Expr: + - * ' ( )  rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth det trace  (F3: help) ")
                     .border_style(focused(Focus::Expr)),
             ),
             expr,

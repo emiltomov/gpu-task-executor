@@ -3,7 +3,7 @@ use crate::gpu::{Gpu, list_adapters};
 use crate::matrix::{clean_expression, evaluate, result_text, save_result, split_input};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 
 const EXAMPLES: &str = "\
 Without --input/--expression the interactive UI starts.
@@ -17,7 +17,12 @@ Input file (definitions), one per line:
 Expression file: + - * ( ) ' (transpose); a number scales, e.g. (A + B) * C' - 2 * A
 Linear transformations (degrees, applied to column vectors): rot(a) rotx(a) roty(a) rotz(a)
   scale(sx, sy[, sz]) shearx(k) sheary(k) identity(n) reflect(a) proj(a), e.g. rot(90) * v
-Use '-' for stdin. The result is printed as 'result = [..]' (or written to --output),
+  Arguments can be any expression giving a number (or one vector): rot(det(A * B) + 10), scale(v)
+  det(M) trace(M): matrix -> number
+Use '-' for stdin. A value that is not a file is used as inline text:
+  gtu -e 'identity(5)'
+  gtu -i 'A=1 2; 3 5' -e 'A * identity(2)'      (separate several matrices with \\n)
+ The result is printed as 'result = [..]' (or written to --output),
 so it can be piped into another run:
 
   gtu --list-gpus                    # index: name (backend, type)
@@ -88,7 +93,19 @@ impl Cli {
     }
 }
 
-fn read(path: &str) -> Result<String> {
+/// A value that looks like a file name (no spaces or operators, has a dot or slash).
+fn looks_like_path(v: &str) -> bool {
+    v.chars()
+        .all(|c| c.is_alphanumeric() || "._-/~\\".contains(c))
+        && v.contains(['.', '/'])
+}
+
+/// Reads a file, stdin ('-'), or takes the value itself as inline text when it is not a file.
+fn read(arg: &str) -> Result<String> {
+    if arg != "-" && !std::path::Path::new(arg).is_file() && !looks_like_path(arg) {
+        return Ok(arg.replace("\\n", "\n"));
+    }
+    let path = arg;
     if path == "-" {
         let mut s = String::new();
         std::io::stdin()
@@ -155,10 +172,16 @@ pub fn run(cli: &Cli) -> Result<()> {
         return finish(cli, &defs, &expr);
     }
     let input = cli.input.as_deref().unwrap_or("-");
+    // Without --input on a terminal there is nothing to read from stdin.
+    let no_input = cli.input.is_none() && std::io::stdin().is_terminal();
     if input == "-" && cli.expression.as_deref() == Some("-") {
         bail!("--input and --expression cannot both read from stdin");
     }
-    let (defs, default_expr) = split_input(&read(input)?);
+    let (defs, default_expr) = split_input(&if no_input {
+        String::new()
+    } else {
+        read(input)?
+    });
     let expr = match &cli.expression {
         Some(p) => clean_expression(&read(p)?),
         None => default_expr.context("no expression: pass --expression or add a '# expr:' line")?,
@@ -201,6 +224,14 @@ mod tests {
         assert!(find_example("0").is_err());
         assert!(find_example("nonexistent").is_err());
         assert!(Cli::parse_from(["gtu", "--list-examples"]).is_batch());
+    }
+
+    #[test]
+    fn inline_values_are_text_unless_they_look_like_files() {
+        assert_eq!(read("A=1 2; 3 5").unwrap(), "A=1 2; 3 5");
+        assert_eq!(read("A=[1]\\nB=[2]").unwrap(), "A=[1]\nB=[2]");
+        assert_eq!(read("identity(5)").unwrap(), "identity(5)");
+        assert!(read("missing_file.txt").is_err());
     }
 
     #[test]
