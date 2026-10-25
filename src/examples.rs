@@ -49,6 +49,13 @@ pub const EXAMPLES: &[Example] = &[
         "graph",
         "reach3"
     ),
+    example!("Maze: A* path through 504 cells", "maze", "maze", "astar"),
+    example!(
+        "Maze: discover every cell (BFS)",
+        "maze",
+        "maze",
+        "discover"
+    ),
     example!("Lighting: Lambert shading", "lighting", "scene", "shading"),
     example!("Lighting: moved light", "lighting", "scene", "moved_light"),
     example!(

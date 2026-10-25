@@ -151,14 +151,41 @@ fn parse_into(text: &str, vars: &mut HashMap<String, Matrix>, depth: u32) -> Res
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             bail!("line {}: bad name '{name}'", n + 1);
         }
-        let m = match body.trim().strip_prefix("image ") {
-            Some(spec) => load_image(spec.trim()),
-            None => Matrix::parse(body),
+        let body = body.trim();
+        let m = if let Some(spec) = body.strip_prefix("image ") {
+            load_image(spec.trim())
+        } else if let Some(spec) = body.strip_prefix("maze ") {
+            parse_maze(spec, vars)
+        } else {
+            Matrix::parse(body)
         }
         .with_context(|| format!("line {}", n + 1))?;
         vars.insert(name.to_string(), m);
     }
     Ok(())
+}
+
+/// `maze W H [seed]`: adjacency matrix of a random W x H grid maze; each value is a number or
+/// the name of a 1x1 matrix defined earlier (e.g. `W = 21`).
+fn parse_maze(spec: &str, vars: &HashMap<String, Matrix>) -> Result<Matrix> {
+    let nums = spec
+        .split_whitespace()
+        .map(|v| size_value(v, vars).with_context(|| format!("bad maze value '{v}'")))
+        .collect::<Result<Vec<_>>>()?;
+    match nums[..] {
+        [w, h] => crate::search::maze(w, h, 1),
+        [w, h, seed] => crate::search::maze(w, h, seed as u64),
+        _ => bail!("expected maze W H [seed]"),
+    }
+}
+
+/// Whole number from a literal or a 1x1 variable (used for maze and graph sizes).
+pub fn size_value(token: &str, vars: &HashMap<String, Matrix>) -> Option<usize> {
+    let v = match token.parse::<f32>() {
+        Ok(v) => v,
+        Err(_) => *vars.get(token).filter(|m| m.is_scalar())?.data.first()?,
+    };
+    (v >= 0.0 && v.fract() == 0.0).then_some(v as usize)
 }
 
 const MAX_IMAGE_SIDE: u32 = 128;
@@ -184,12 +211,17 @@ fn load_image(spec: &str) -> Result<Matrix> {
     })
 }
 
-/// Matrix name from the first `graph NAME` line of the definitions, if any.
-pub fn graph_name(defs: &str) -> Option<String> {
-    defs.lines()
-        .find_map(|l| l.trim().strip_prefix("graph "))
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
+/// Matrix name and optional grid width (a number or variable name, see [`size_value`]) from the
+/// first `graph NAME [grid WIDTH]` line of the definitions, if any.
+pub fn graph_spec(defs: &str) -> Option<(String, Option<String>)> {
+    let rest = defs.lines().find_map(|l| l.trim().strip_prefix("graph "))?;
+    let mut words = rest.split_whitespace();
+    let name = words.next()?.to_string();
+    let grid = match (words.next(), words.next()) {
+        (Some("grid"), Some(w)) => Some(w.to_string()),
+        _ => None,
+    };
+    Some((name, grid))
 }
 
 /// Path from the first `output path` line of the definitions, if any.
@@ -405,6 +437,29 @@ fn eval(e: &Expr, vars: &HashMap<String, Matrix>, be: &dyn Backend) -> Result<Ma
             } else {
                 trace(&m)
             })
+        }
+        Expr::Call(name, args) if name == "astar" || name == "bfs" => {
+            let want = if name == "astar" { 3..=4 } else { 2..=2 };
+            if !want.contains(&args.len()) {
+                bail!(
+                    "{name}() takes {} arguments",
+                    if name == "astar" { "3-4" } else { "2" }
+                );
+            }
+            let m = eval(&args[0], vars, be)?;
+            let mut nums = Vec::new();
+            for a in &args[1..] {
+                let v = eval(a, vars, be)?;
+                if !v.is_scalar() || v.data[0].fract() != 0.0 || v.data[0] < 0.0 {
+                    bail!("{name}() node numbers and width must be whole numbers");
+                }
+                nums.push(v.data[0] as usize);
+            }
+            if name == "bfs" {
+                crate::search::bfs(&m, nums[0])?
+            } else {
+                crate::search::astar(&m, nums[0], nums[1], nums.get(2).copied())?
+            }
         }
         Expr::Call(name, args) => {
             let mut values = Vec::new();
@@ -932,8 +987,20 @@ mod tests {
 
     #[test]
     fn graph_directive_and_scalar_broadcast() {
-        assert_eq!(graph_name("A = [1]\ngraph A\n"), Some("A".into()));
-        assert_eq!(graph_name("A = [1]"), None);
+        assert_eq!(graph_spec("A = [1]\ngraph A\n"), Some(("A".into(), None)));
+        assert_eq!(
+            graph_spec("graph M grid W"),
+            Some(("M".into(), Some("W".into())))
+        );
+        let vars = parse_definitions("W = 4\nH = 3\nM = maze W H 2").unwrap();
+        assert_eq!(vars["M"].rows, 12);
+        assert_eq!(
+            (size_value("W", &vars), size_value("5", &vars)),
+            (Some(4), Some(5))
+        );
+        assert_eq!(size_value("M", &vars), None);
+        assert!(parse_definitions("M = maze X 3").is_err());
+        assert_eq!(graph_spec("A = [1]"), None);
         let r = evaluate("A = [1 2; 3 4]", "A - 1 + ones(2, 2)", &Cpu).unwrap();
         assert_eq!(r.data, vec![1.0, 2.0, 3.0, 4.0]);
     }
@@ -954,6 +1021,7 @@ mod tests {
         for (dir, input) in [
             ("markov", "chain"),
             ("graph", "graph"),
+            ("maze", "maze"),
             ("lighting", "scene"),
         ] {
             for entry in std::fs::read_dir(root.join(dir)).unwrap() {

@@ -1,0 +1,7 @@
+# Random perfect maze: W x H cells (edit W and H to resize). Each cell is a node and
+# every passage an edge (node i is at column i % W, row i / W).
+W = 21
+H = 24
+M = maze W H 7
+graph M grid W
+# expr: astar(M, 0, W * H - 1, W)

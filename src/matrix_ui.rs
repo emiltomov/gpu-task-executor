@@ -3,8 +3,8 @@ use crate::examples::EXAMPLES;
 use crate::gpu::Gpu;
 use crate::graph::{self, Graph};
 use crate::matrix::{
-    Matrix, evaluate, graph_name, load_input, output_path, parse_definitions, save_input,
-    save_result,
+    Matrix, evaluate, graph_spec, load_input, output_path, parse_definitions, save_input,
+    save_result, size_value,
 };
 use ratatui::{
     Frame,
@@ -25,6 +25,7 @@ enum Focus {
 enum Prompt {
     Save,
     SaveResult,
+    ExportMaze,
     Open,
 }
 
@@ -98,6 +99,10 @@ pub const EXPR_HELP: (&str, &[&str]) = (
         "Arguments may be any expression giving a number (1x1), or one vector:",
         "  rot(det(A * B) + 10)   scale(v)",
         "  ones(r, c)             matrix of ones",
+        "Graph search on an adjacency matrix (result is a node vector):",
+        "  bfs(A, s)              hops from node s + 1 for every reachable node",
+        "  astar(A, s, g[, w])    shortest path s -> g as steps 1, 2, ...; w = grid",
+        "                         width enables the Manhattan heuristic",
         "  smooth(n)              n x n blur kernel (1 2 1)/4",
         "e.g.  rot(90) * v     rotz(30) * scale(1, 2, 3) * P",
         "      smooth(96) * I * smooth(96)'",
@@ -120,8 +125,10 @@ pub const HELP: (&str, &[&str]) = (
         "Ctrl+C/X/V/A   copy / cut / paste / select all",
         "Ctrl+S         save input    Ctrl+O  open file",
         "Ctrl+R         save result once (asks for a path)",
+        "Ctrl+E         export a `graph NAME grid W` maze + A*/BFS solutions as zip",
         "F2             load an example (also in the main menu)",
-        "graph NAME    (in definitions) draw matrix NAME as a 2D graph",
+        "graph NAME [grid W]  (in definitions) draw matrix NAME as a graph (grid: node i at column i % W)",
+        "M = maze W H [seed]  random maze; W, H, seed: numbers or variables (W = 21)",
         "F3             expression help: all operations",
         "F1             this help",
         "Esc            back",
@@ -186,12 +193,17 @@ impl MatrixUi {
                 .cloned(),
             _ => None,
         };
-        if let Some(name) = graph_name(&defs) {
+        if let Some((name, grid)) = graph_spec(&defs) {
             let built = parse_definitions(&defs)
                 .ok()
-                .and_then(|vars| vars.get(&name).cloned())
+                .and_then(|vars| {
+                    let grid = grid.and_then(|w| size_value(&w, &vars));
+                    vars.get(&name).cloned().map(|m| (m, grid))
+                })
                 .ok_or_else(|| format!("graph: unknown matrix '{name}'"))
-                .and_then(|m| Graph::from_matrix(&m).map_err(|e| format!("graph: {e:#}")));
+                .and_then(|(m, grid)| {
+                    Graph::from_matrix(&m, grid).map_err(|e| format!("graph: {e:#}"))
+                });
             match built {
                 Ok(g) => self.graph = Some((name, g)),
                 Err(e) => self.status = Some(Err(e)),
@@ -253,10 +265,11 @@ impl MatrixUi {
         if ctrl {
             if let KeyCode::Char(c) = key.code {
                 match c.to_ascii_lowercase() {
-                    's' | 'o' | 'r' if self.prompt.is_none() => {
+                    's' | 'o' | 'r' | 'e' if self.prompt.is_none() => {
                         let (kind, name) = match c.to_ascii_lowercase() {
                             's' => (Prompt::Save, "matrices.txt"),
                             'o' => (Prompt::Open, "matrices.txt"),
+                            'e' => (Prompt::ExportMaze, "maze.zip"),
                             _ => (Prompt::SaveResult, "result.txt"),
                         };
                         if kind != Prompt::SaveResult || matches!(self.result, Some(Ok(_))) {
@@ -340,6 +353,7 @@ impl MatrixUi {
                 Some(Ok(m)) => save_result(path, m).map(|_| format!("Result saved to {path}")),
                 _ => return Err("Nothing to save: calculate a result first".into()),
             },
+            Prompt::ExportMaze => self.export_maze(path),
             Prompt::Open => load_input(path).map(|(defs, expr)| {
                 self.defs = Editor::new(&defs);
                 if let Some(e) = expr {
@@ -350,6 +364,28 @@ impl MatrixUi {
             }),
         };
         done.map_err(|e| format!("{e:#}"))
+    }
+
+    /// Zips the grid graph (`graph NAME grid W`) as a maze with A*/BFS solutions and the inputs.
+    fn export_maze(&self, path: &str) -> anyhow::Result<String> {
+        use anyhow::Context;
+        let defs = self.defs.text();
+        let Some((name, Some(width))) = graph_spec(&defs) else {
+            anyhow::bail!("export needs a `graph NAME grid W` line in the definitions");
+        };
+        let mut vars = parse_definitions(&defs)?;
+        let width =
+            size_value(&width, &vars).with_context(|| format!("bad grid width '{width}'"))?;
+        let m = vars
+            .remove(&name)
+            .with_context(|| format!("unknown matrix '{name}'"))?;
+        let input = format!("{}\n# expr: {}\n", defs.trim_end(), self.expr.text());
+        let result = match &self.result {
+            Some(Ok(r)) => Some(r),
+            _ => None,
+        };
+        crate::search::save_maze_bundle(path, &m, width, &input, result)?;
+        Ok(format!("Maze and solutions saved to {path}"))
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
@@ -399,6 +435,7 @@ impl MatrixUi {
             let title = match kind {
                 Prompt::Save => " Save to file (Enter: save, Esc: cancel) ",
                 Prompt::SaveResult => " Save result to file (Enter: save, Esc: cancel) ",
+                Prompt::ExportMaze => " Export maze + solutions as zip (Enter: save, Esc: cancel) ",
                 Prompt::Open => " Open file (Enter: load, Esc: cancel) ",
             };
             frame.render_widget(
@@ -472,7 +509,7 @@ impl MatrixUi {
             lines.insert(0, Line::styled(msg.as_str(), Style::new().fg(color)));
         }
         let outer = Block::bordered().title(" Result ")
-            .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+O open  F2: examples  F3: expr help  F1: help  Esc: back ");
+            .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+E export maze zip  Ctrl+O open  F2: examples  F3: expr help  F1: help  Esc: back ");
         let inner = outer.inner(result);
         frame.render_widget(outer, result);
         if let (Some(before), Some(Ok(after))) = (&self.before, &self.result) {

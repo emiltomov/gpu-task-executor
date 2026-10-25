@@ -10,6 +10,7 @@ mod graph;
 mod mandelbrot;
 mod matrix;
 mod matrix_ui;
+mod search;
 
 use anyhow::Result;
 use automata::Kind;

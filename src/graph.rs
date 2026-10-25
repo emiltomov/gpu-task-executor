@@ -11,8 +11,11 @@ use ratatui::{
         canvas::{Canvas, Circle, Line},
     },
 };
+use std::collections::HashSet;
 
-const MAX_NODES: usize = 200;
+const MAX_NODES: usize = 1000;
+/// Above this many nodes the picture drops circles and labels so edges stay readable.
+const DETAILED_NODES: usize = 60;
 const NODE_RADIUS: f64 = 0.06;
 
 /// Directed weighted graph read from an adjacency matrix (`m[i][j] != 0` is an edge i -> j).
@@ -20,10 +23,19 @@ pub struct Graph {
     pub n: usize,
     pub edges: Vec<(usize, usize, f32)>,
     pub pos: Vec<(f64, f64)>,
+    /// Set for grid graphs (mazes): longest path and dead ends are highlighted.
+    pub maze: Option<MazeInfo>,
+}
+
+pub struct MazeInfo {
+    /// Undirected edges (smaller index first) along the longest path.
+    pub longest: HashSet<(usize, usize)>,
+    pub dead_ends: Vec<usize>,
 }
 
 impl Graph {
-    pub fn from_matrix(m: &Matrix) -> Result<Self> {
+    /// `grid_width` places node `i` at column `i % w`, row `i / w` instead of force-directed.
+    pub fn from_matrix(m: &Matrix, grid_width: Option<usize>) -> Result<Self> {
         if m.rows != m.cols {
             bail!("a graph needs a square matrix, got {}x{}", m.rows, m.cols);
         }
@@ -38,8 +50,18 @@ impl Graph {
             .filter(|&i| m.data[i] != 0.0)
             .map(|i| (i / n, i % n, m.data[i]))
             .collect::<Vec<_>>();
-        let pos = layout(n, &edges);
-        Ok(Self { n, edges, pos })
+        let grid = grid_width.filter(|&w| w > 0);
+        let pos = match grid {
+            Some(w) => grid_layout(n, w),
+            None => layout(n, &edges),
+        };
+        let maze = grid.map(|_| maze_info(n, &edges));
+        Ok(Self {
+            n,
+            edges,
+            pos,
+            maze,
+        })
     }
 
     fn weighted(&self) -> bool {
@@ -49,6 +71,62 @@ impl Graph {
     fn has_edge(&self, a: usize, b: usize) -> bool {
         self.edges.iter().any(|e| e.0 == a && e.1 == b)
     }
+}
+
+/// Longest path (tree diameter by double BFS, exact for mazes) and dead ends (one neighbor).
+fn maze_info(n: usize, edges: &[(usize, usize, f32)]) -> MazeInfo {
+    let mut adj = vec![Vec::new(); n];
+    for &(a, b, _) in edges.iter().filter(|e| e.0 != e.1) {
+        adj[a].push(b);
+        adj[b].push(a);
+    }
+    for list in &mut adj {
+        list.sort_unstable();
+        list.dedup();
+    }
+    let bfs = |from: usize| {
+        let mut prev = vec![usize::MAX; n];
+        let mut order = vec![from];
+        prev[from] = from;
+        let mut head = 0;
+        while head < order.len() {
+            let i = order[head];
+            head += 1;
+            for &j in &adj[i] {
+                if prev[j] == usize::MAX {
+                    prev[j] = i;
+                    order.push(j);
+                }
+            }
+        }
+        (*order.last().unwrap(), prev)
+    };
+    let mut longest = HashSet::new();
+    if n > 0 {
+        let (a, _) = bfs(0);
+        let (b, prev) = bfs(a);
+        let mut cur = b;
+        while cur != a {
+            longest.insert((cur.min(prev[cur]), cur.max(prev[cur])));
+            cur = prev[cur];
+        }
+    }
+    let dead_ends = (0..n).filter(|&i| adj[i].len() == 1).collect();
+    MazeInfo { longest, dead_ends }
+}
+
+fn grid_layout(n: usize, w: usize) -> Vec<(f64, f64)> {
+    let h = n.div_ceil(w);
+    let scale = |i: usize, len: usize| {
+        if len < 2 {
+            0.0
+        } else {
+            (i as f64 / (len - 1) as f64 * 2.0 - 1.0) * 0.9
+        }
+    };
+    (0..n)
+        .map(|i| (scale(i % w, w), -scale(i / w, h)))
+        .collect()
 }
 
 /// Force-directed (Fruchterman-Reingold) layout starting from a circle, scaled into [-1, 1].
@@ -124,12 +202,20 @@ pub fn draw(frame: &mut Frame, area: Rect, title: &str, g: &Graph, values: Optio
                     continue;
                 }
                 let ((x1, y1), (x2, y2)) = (p(a), p(b));
+                let on_longest = g
+                    .maze
+                    .as_ref()
+                    .is_some_and(|m| m.longest.contains(&(a.min(b), a.max(b))));
                 ctx.draw(&Line {
                     x1,
                     y1,
                     x2,
                     y2,
-                    color: Color::DarkGray,
+                    color: if on_longest {
+                        Color::Green
+                    } else {
+                        Color::DarkGray
+                    },
                 });
                 if !g.has_edge(b, a) {
                     arrowhead(ctx, (x1, y1), (x2, y2));
@@ -142,10 +228,29 @@ pub fn draw(frame: &mut Frame, area: Rect, title: &str, g: &Graph, values: Optio
                     );
                 }
             }
+            if let Some(m) = &g.maze {
+                for &i in &m.dead_ends {
+                    let (x, y) = p(i);
+                    ctx.print(x, y, Span::styled("█", Style::new().fg(Color::Red)));
+                }
+            }
+            let detailed = g.n <= DETAILED_NODES;
             for i in 0..g.n {
                 let (x, y) = p(i);
                 let lit = values.is_some_and(|v| v.get(i).is_some_and(|&x| x > 0.0));
-                let color = if lit { Color::Green } else { Color::Cyan };
+                // Mazes keep green for the longest path; result highlights turn yellow.
+                let lit_color = if g.maze.is_some() {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                };
+                let color = if lit { lit_color } else { Color::Cyan };
+                if !detailed {
+                    if lit {
+                        ctx.print(x, y, Span::styled("█", Style::new().fg(color)));
+                    }
+                    continue;
+                }
                 ctx.draw(&Circle {
                     x,
                     y,
@@ -186,7 +291,7 @@ mod tests {
     use super::*;
 
     fn graph(text: &str) -> Result<Graph> {
-        Graph::from_matrix(&Matrix::parse(text)?)
+        Graph::from_matrix(&Matrix::parse(text)?, None)
     }
 
     #[test]
@@ -200,6 +305,25 @@ mod tests {
             ((g.pos[a].0 - g.pos[b].0).powi(2) + (g.pos[a].1 - g.pos[b].1).powi(2)).sqrt()
         };
         assert!(d(3, 4) < d(0, 4));
+    }
+
+    #[test]
+    fn grid_layout_places_cells_by_index() {
+        let m = Matrix::parse("[0 1 0 0; 1 0 0 0; 0 0 0 1; 0 0 1 0]").unwrap();
+        let g = Graph::from_matrix(&m, Some(2)).unwrap();
+        assert!(g.pos[0].0 < g.pos[1].0 && g.pos[0].1 > g.pos[2].1);
+        assert_eq!(g.pos[0].0, g.pos[2].0);
+    }
+
+    #[test]
+    fn grid_graph_finds_longest_path_and_dead_ends() {
+        // Path 0-1-2 plus a branch 1-3: dead ends are 0, 2, 3; longest path has 2 edges.
+        let m = Matrix::parse("[0 1 0 0; 1 0 1 1; 0 1 0 0; 0 1 0 0]").unwrap();
+        let g = Graph::from_matrix(&m, Some(2)).unwrap();
+        let info = g.maze.unwrap();
+        assert_eq!(info.dead_ends, vec![0, 2, 3]);
+        assert_eq!(info.longest.len(), 2);
+        assert!(Graph::from_matrix(&m, None).unwrap().maze.is_none());
     }
 
     #[test]
