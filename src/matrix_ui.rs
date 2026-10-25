@@ -70,9 +70,33 @@ pub struct MatrixUi {
     graph: Option<(String, Graph)>,
     /// Input picture matching a large (image-sized) result, drawn next to it.
     before: Option<Matrix>,
+    expr_help: bool,
     focus: Focus,
     result: Option<Result<Matrix, String>>,
 }
+
+pub const EXPR_HELP: (&str, &[&str]) = (
+    "Expression operations",
+    &[
+        "A + B   A - B      element-wise; a number also works: A - 1, 2 + A",
+        "A * B              matrix product; a number scales: 2 * A",
+        "A'                 transpose        -A  negate        ( )  grouping",
+        "Compose freely:    (A + B) * C' - 2 * A",
+        "Linear transformations (degrees, apply to column vectors):",
+        "  rot(a)                 2D rotation",
+        "  rotx(a) roty(a) rotz(a)  3D rotations",
+        "  scale(sx, sy[, sz])    scaling",
+        "  shearx(k) sheary(k)    shear",
+        "  reflect(a)             mirror across the line at angle a",
+        "  proj(a)                project onto the line at angle a",
+        "  identity(n)            n x n identity",
+        "  ones(r, c)             matrix of ones",
+        "  smooth(n)              n x n blur kernel (1 2 1)/4",
+        "e.g.  rot(90) * v     rotz(30) * scale(1, 2, 3) * P",
+        "      smooth(96) * I * smooth(96)'",
+        "Esc / F3 close",
+    ],
+);
 
 pub const HELP: (&str, &[&str]) = (
     "Matrices",
@@ -81,13 +105,7 @@ pub const HELP: (&str, &[&str]) = (
         "Include:  include path/to/file.txt",
         "Output:   output path/to/result.txt  (definitions line; the result",
         "          is written there on every calculation)",
-        "Expr:     + - * ( ) ' (transpose); a number scales",
-        "          e.g. (A + B) * C' - 2 * A",
-        "Linear transformations (angles in degrees, apply to column vectors):",
-        "          rot(a) rotx(a) roty(a) rotz(a)  rotations",
-        "          scale(sx, sy[, sz])  shearx(k) sheary(k)  identity(n)",
-        "          reflect(a) mirror across line at angle a; proj(a) project onto it",
-        "          e.g. rot(90) * v      rotz(30) * scale(1, 2, 3) * P",
+        "Expr:     operators and functions: press F3",
         "Tab            switch definitions / expression",
         "Enter          calculate (in expression), F5 anywhere",
         "Arrows, Home/End, Shift  move / select",
@@ -96,6 +114,7 @@ pub const HELP: (&str, &[&str]) = (
         "Ctrl+R         save result once (asks for a path)",
         "F2             load an example (also in the main menu)",
         "graph NAME    (in definitions) draw matrix NAME as a 2D graph",
+        "F3             expression help: all operations",
         "F1             this help",
         "Esc            back",
     ],
@@ -112,6 +131,7 @@ impl MatrixUi {
             examples: None,
             graph: None,
             before: None,
+            expr_help: false,
             focus: Focus::Expr,
             result: None,
         }
@@ -170,6 +190,12 @@ impl MatrixUi {
 
     /// Returns `true` when the user wants to leave the screen.
     pub fn handle_key(&mut self, key: KeyEvent, gpu: &Gpu) -> bool {
+        if self.expr_help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(3)) {
+                self.expr_help = false;
+            }
+            return false;
+        }
         if let Some(list) = &mut self.examples {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => list.select_previous(),
@@ -252,6 +278,7 @@ impl MatrixUi {
                 }
             }
             KeyCode::F(5) => self.calculate(gpu),
+            KeyCode::F(3) if self.prompt.is_none() => self.expr_help = true,
             KeyCode::F(2) if self.prompt.is_none() => {
                 self.examples = Some(ListState::default().with_selected(Some(0)));
             }
@@ -308,6 +335,19 @@ impl MatrixUi {
             frame.render_stateful_widget(list, area, state);
             return;
         }
+        if self.expr_help {
+            let lines: Vec<Line> = EXPR_HELP.1.iter().map(|l| Line::from(*l)).collect();
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(lines).block(
+                    Block::bordered()
+                        .title(format!(" {} ", EXPR_HELP.0))
+                        .title_bottom(" Esc/F3: close "),
+                ),
+                area,
+            );
+            return;
+        }
         let [defs, expr, prompt, result] = Layout::vertical([
             Constraint::Length(self.defs.line_count() as u16 + 2),
             Constraint::Length(3),
@@ -356,7 +396,7 @@ impl MatrixUi {
             )
             .block(
                 Block::bordered()
-                    .title(" Expression: + - * ( ) ' (transpose), numbers scale ")
+                    .title(" Expr: + - * ' ( )  rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth  (F3: help) ")
                     .border_style(focused(Focus::Expr)),
             ),
             expr,
@@ -383,7 +423,7 @@ impl MatrixUi {
             lines.insert(0, Line::styled(msg.as_str(), Style::new().fg(color)));
         }
         let outer = Block::bordered().title(" Result ")
-            .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+O open  F2: examples  F1: help  Esc: back ");
+            .title_bottom(" Tab: switch  Enter: calculate  arrows/Shift: move/select  Ctrl+C/X/V/A  Ctrl+S save  Ctrl+R save result  Ctrl+O open  F2: examples  F3: expr help  F1: help  Esc: back ");
         let inner = outer.inner(result);
         frame.render_widget(outer, result);
         if let (Some(before), Some(Ok(after))) = (&self.before, &self.result) {
@@ -481,6 +521,19 @@ mod tests {
         ui.calculate(&gpu);
         let before = ui.before.expect("before picture");
         assert_eq!((before.rows, before.cols), (96, 96));
+    }
+
+    #[test]
+    fn f3_toggles_expression_help_without_typing() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut ui = MatrixUi::new();
+        let before = ui.expr.text();
+        ui.handle_key(KeyEvent::from(KeyCode::F(3)), &gpu);
+        assert!(ui.expr_help);
+        ui.handle_key(KeyEvent::from(KeyCode::Char('x')), &gpu);
+        assert_eq!(ui.expr.text(), before);
+        ui.handle_key(KeyEvent::from(KeyCode::Esc), &gpu);
+        assert!(!ui.expr_help);
     }
 
     #[test]
