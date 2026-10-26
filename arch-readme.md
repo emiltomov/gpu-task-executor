@@ -143,9 +143,9 @@ Adapters on a typical dev machine: Intel UHD, NVIDIA (Vulkan), llvmpipe (CPU), N
 | `split_input`, `output_path`, `graph_name` | Extract the `# expr:` default expression and directives. |
 | Tokenizer/Parser → `Expr` | `+ - *`, unary `-`, `'` (transpose), parentheses, function calls; arguments are full expressions. |
 | `eval` | Evaluates `Expr` through a `Backend`; `+`/`-` broadcast a number over a matrix; `*` with a 1×1 operand scales. |
-| `transformation()` | `rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth` (degrees, column vectors). `det`/`trace` reduce a matrix to a number; one vector argument expands into several (`scale(v)`). |
+| `transformation()` | `rot rotx roty rotz scale shearx sheary reflect proj identity ones smooth flip` (degrees, column vectors). CPU-side calls in `eval`: `rows cols resize raycast astar bfs`. `det`/`trace` reduce a matrix to a number; one vector argument expands into several (`scale(v)`). |
 | `Gpu::dispatch(op, a, b, rows, cols, inner)` | One dispatch, workgroup size 64; ops: `0 add · 1 sub · 2 matmul · 3 transpose · 4 scale by b[0]`; limit `MAX_ELEMENTS = 64 * 65535`. |
-| File I/O | `load_input`, `save_input` (expression stored as `# expr:`), `save_result` (`result = [..]`), `result_text`, `clean_expression`. |
+| File I/O | `expand_tilde` (`~` in every path), `load_input` (text, maze `.zip` → `input.txt`, image → `I = image PATH`), `main_size`/`remap_sizes` (fit expression sizes to an opened matrix), `save_png`, `back_expression` (`# back:` line), `evaluate_vars`,  `save_input` (expression stored as `# expr:`), `save_result` (`result = [..]`), `result_text`, `clean_expression`. |
 | `load_image` | PNG/JPEG → grayscale matrix, at most 128 px per side; `builtin:earth` is a bundled NASA photo (`examples/lighting/earth.png`). |
 
 > [!IMPORTANT]
@@ -155,9 +155,10 @@ Adapters on a typical dev machine: Intel UHD, NVIDIA (Vulkan), llvmpipe (CPU), N
 
 - Two editors (`Editor`): **definitions** (multi-line, capped at 35 % of the window height and scrollable) and **expression** (single line).
 - Result pane: numbers (scrollable with `PgUp/PgDn`, `Ctrl+arrows`), a **graph** next to it (`graph NAME`), or **before/after** pictures for image-sized results.
-- Keys: `Tab` switch · `Enter`/`F5` calculate · `Ctrl+C/X/V/A` clipboard · `Ctrl+S/O/R` save input / open / save result · `F1` help · `F2` examples picker · `F3` expression help · `Esc` back.
+- Keys: `Tab` switch · `Enter`/`F5` calculate · `Ctrl+C/X/V/A` clipboard · `Ctrl+S/O/R` save input / open (txt, maze zip, image) / save result · `Ctrl+E` export (maze zip or image PNG only) · `Ctrl+N`/`Ctrl+P` feed the result back as input and apply the forward / editable back expression (default back restores the previous result exactly) · `F1` help · `F2` examples picker · `F3` expression help · `Esc` back.
 - `Clip` uses the system clipboard (`arboard`, Wayland data-control) and falls back to an internal buffer.
-- Prompts (`Prompt::Save | SaveResult | Open`) reuse `Editor` for the path.
+- A third editor (back expression) appears for image results; the result title shows `example | opened file`.
+- Prompts (`Prompt::Save | SaveResult | Export | Open`) reuse `Editor` for the path.
 
 ### 5.3 `editor.rs`
 
@@ -220,6 +221,7 @@ Available from the main menu, `F2` in the Matrices screen and `gtu --example`. A
 
 - `cargo build`, `cargo run` (needs a real terminal), `cargo test`.
 - Binary name `gtu` via `[[bin]]` in `Cargo.toml` (package `gpu-task-executor`, edition 2024).
+- macOS: Metal backend, needs only the Xcode command line tools (see README).
 - Main crates: `wgpu`, `pollster`, `bytemuck`, `ratatui`, `clap`, `anyhow`, `rand`, `nvml-wrapper`, `arboard`, `image` (png + jpeg only).
 - CI: `.github/workflows/rust.yml` runs `cargo build` and `cargo test` on pushes/PRs to `main`.
 
